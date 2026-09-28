@@ -1,0 +1,161 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <getopt.h>
+
+#include "../include/config.h"
+#include "../include/common.h"
+
+Config_t config;
+struct options opt;
+
+
+int option_command_parser(int argc, char** argv)
+{
+    memset(&opt, 0, sizeof(struct options));
+
+    int optValue = 0;
+    const char* optstring = "c";
+    const struct option long_options[] = {
+        {"config",              required_argument,  NULL,   'c'},
+        {"graceful_restart",    no_argument,        NULL,   'g'},
+        {"vp",                  required_argument,  NULL,   'v'},
+        {0,0,0,0}
+    };
+
+    while ((optValue = getopt_long(argc, argv, optstring, long_options, NULL)) != -1) {
+        switch(optValue)
+        {
+            case 'c':
+                opt.configFile = optarg;
+                break;
+
+            case 'v':
+                break;
+
+            default:
+                return -1;
+                break;
+        }
+    }
+
+    if (!opt.configFile)
+    {
+        opt.configFile = DEFAULT_CONFIG_FILE;
+    }
+
+    return 0;
+}
+
+/* ----------------------- STRING HELPERS ----------------------- */
+
+static char* trim(char *s)
+{
+    while (isspace((unsigned char)*s)) s++;
+    if (*s == 0) return s;
+    char *end = s + strlen(s) - 1;
+    while (end > s && isspace((unsigned char)*end)) end--;
+    end[1] = '\0';
+    return s;
+}
+
+
+
+static int split_param(char *line, char **param, char **value)
+{
+    char *p = strchr(line, ':');
+    if (!p) return 0;
+    *p = 0;
+    *param = trim(line);
+    *value = trim(p + 1);
+    return 1;
+}
+
+/* ----------------------- DEFAULT VALUES ----------------------- */
+
+static void Config_set_defaults(Config_t *cfg)
+{
+    memset(cfg, 0, sizeof(Config_t));
+
+    strcpy(cfg->client_crt, DEFAULT_CLIENT_CRT);
+    strcpy(cfg->client_key, DEFAULT_CLIENT_KEY);
+    strcpy(cfg->ca_crt, DEFAULT_CA_CRT);
+}
+
+
+/* ----------------------- LIST PARSER ----------------------- */
+
+static int parse_comma_int_list(const char *str, char *out)
+{
+    strncpy(out, str, MAX_CHAR_DIRECTORY-1);
+    return 1;
+}
+
+/* ----------------------- MAIN CONFIG PARSER ----------------------- */
+
+int Config_read(const char *file)
+{
+    FILE *f = fopen(file, "r");
+    if (!f) {
+        fprintf(stderr, "Could not open config file: %s\n", file);
+        return -1;
+    }
+
+    Config_set_defaults(&config);
+
+    char line[2048];
+    int mode = 0; /* 1=BGP / 2=BMP */
+    int peer_index = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+
+        char *s = trim(line);
+        if (*s == 0 || *s == '#')
+            continue;
+
+        /* ---- PARAMETER LINE ---- */
+        char *param, *value;
+        if (!split_param(s, &param, &value)) {
+            fprintf(stderr, "Invalid line: %s\n", s);
+            fclose(f);
+            return -1;
+        }
+
+        /* ---- COMMON PARAMETERS ---- */
+        if (strcmp(param, "debug_level") == 0)
+            config.debug_level = atoi(value);
+        else if (strcmp(param, "log_file") == 0)
+            strncpy(config.log_file, value, MAX_CHAR_DIRECTORY-1);
+        else if (strcmp(param, "local_addr") == 0) {
+            ip_to_sockaddr(value, &config.local_addr, 0);
+            strncpy(config.local_addr_string, value, MAX_IP_LENGTH-1);
+        }
+        else if (strcmp(param, "local_port") == 0) {
+            config.local_port = atoi(value);
+        }
+        else if (strcmp(param, "collector_ip") == 0) {
+            ip_to_sockaddr(value, &config.remote_addr, 0);
+            strncpy(config.remote_addr_string, value, MAX_IP_LENGTH-1);
+        }
+        else if (strcmp(param, "collector_port") == 0) {
+            config.remote_port = atoi(value);
+        }
+        else if (strcmp(param, "use_tls") == 0)
+            config.use_tls = atoi(value);
+
+    fclose(f);
+
+    /* ---------------- MANDATORY CHECKS ---------------- */
+
+    if (config.local_addr_string[0] == 0 ||
+        config.local_port == 0 ||
+        config.remote_addr_string[0] == 0 ||
+        config.remote_port == 0)
+    {
+        _ERROR("Missing mandatory general parameters\n");
+        return -1;
+    }
+
+    return 0;
+}
