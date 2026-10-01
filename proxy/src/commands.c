@@ -128,12 +128,18 @@ void free_command_node(struct command_node* node)
 void command_finish()
 {
     free_command_tree(tree);
-    for (int i = 0 ; i < 16 ; i++) 
+    tree = NULL;
+
+    if (!arg)
+        return;
+
+    for (int i = 0 ; i < 16 ; i++)
     {
         free(arg[i]);
     }
 
     free(arg);
+    arg = NULL;
 }
 
 

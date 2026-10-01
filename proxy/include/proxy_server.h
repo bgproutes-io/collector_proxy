@@ -85,7 +85,8 @@ void Raw_message_free(Raw_message_t *message);
 /** Free all messages and queue bookkeeping owned by a server. */
 void Proxy_server_clear_message_queue(Proxy_server_t *server);
 
-void Proxy_server_process_router_message(Proxy_server_t* proxy, char* buf, int buf_len);
+void Proxy_server_process_router_message(Proxy_server_t* proxy,
+                                         uint8_t* buf, int buf_len);
 void Proxy_server_empty_queued_messages(Proxy_server_t* proxy);
 
 

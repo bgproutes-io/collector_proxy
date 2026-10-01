@@ -65,7 +65,7 @@ int main(int argc, char** argv)
     }
 
     /* Initialize the debug file */
-    init_debug(&config, LOG_LEVEL_IMPORTANT);
+    init_debug(config.log_file, config.debug_level);
 
     /* Initialize the values for the timers */
     timers = Timer_list_new();
@@ -79,6 +79,7 @@ int main(int argc, char** argv)
         ERROR(LOG_LEVEL_ALWAYS, "Unable to create the global Proxy server instance.");
         Timer_list_free(timers);
         finish_debug();
+        Config_cleanup();
         return EXIT_FAILURE;
     }
 
@@ -175,7 +176,7 @@ int main(int argc, char** argv)
                 WARNING(LOG_LEVEL_IMPORTANT, "Connection with the collector is down.");
                 Proxy_server_close_collector(global_server);
             }
-            else if (size == -1)
+            else if (size < 0)
             {
                 if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
                 {
@@ -232,6 +233,7 @@ int main(int argc, char** argv)
     Proxy_server_free(global_server);
     command_finish();
     finish_debug();
+    Config_cleanup();
 
     return 0;
 }
