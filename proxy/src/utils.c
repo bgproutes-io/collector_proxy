@@ -57,4 +57,29 @@ ssize_t send_no_sigpipe(int sock, const void *buf, size_t len, int flags)
 }
 
 
+int ip_to_sockaddr(const char *ip_str, SS *addr, int port)
+{
+    if (!ip_str || !addr)
+        return -1;
+
+    memset(addr, 0, sizeof(*addr));
+
+    struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
+    if (inet_pton(AF_INET, ip_str, &addr4->sin_addr) == 1) {
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons((uint16_t)port);
+        return 0;
+    }
+
+    struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
+    if (inet_pton(AF_INET6, ip_str, &addr6->sin6_addr) == 1) {
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons((uint16_t)port);
+        return 0;
+    }
+
+    memset(addr, 0, sizeof(*addr));
+    return -1;
+}
+
 

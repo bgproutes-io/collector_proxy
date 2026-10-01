@@ -25,6 +25,7 @@
 
 #include "common.h"
 #include "utils.h"
+#include "blacklist.h"
 
 /* ========================================================================== */
 /*                             CLI OPTION HANDLING                             */
@@ -65,6 +66,11 @@ extern int option_command_parser(int argc, char** argv);
 #define DEFAULT_CLIENT_KEY          "client.key"
 #define DEFAULT_CA_CRT              "ca.crt"
 
+typedef enum {
+    PROTOCOL_BGP = 0,
+    PROTOCOL_BMP
+} Peering_protocol_t;
+
 
 /* ========================================================================== */
 /*                               MAIN CONFIG STRUCT                            */
@@ -85,9 +91,20 @@ typedef struct config_s
     SS   local_addr;
     char local_addr_string[MAX_IP_LENGTH];
     int  local_port;
+
     SS   remote_addr;
     char remote_addr_string[MAX_IP_LENGTH];
     int  remote_port;
+
+    SS   command_addr;
+    char command_addr_string[MAX_IP_LENGTH];
+    int  command_port;
+
+    /* --------------------  PROXY FILTERING --------------------- */
+    Peering_protocol_t proto;
+    bool proto_configured;
+    Blacklist_t *blacklisted_asns;
+    Blacklist_t *blacklisted_ips;
 
     /* --------------------  SSL INFO --------------------- */
     bool use_tls;
@@ -116,5 +133,12 @@ extern Config_t config;
  * @return 0 on success, -1 on error.
  */
 int Config_read(const char* file);
+
+/** Release allocations owned by the global configuration. */
+void Config_cleanup(void);
+
+/** Average O(1) blacklist membership checks. */
+bool Config_is_asn_blacklisted(uint32_t asn);
+bool Config_is_ip_blacklisted(const SS *ip);
 
 #endif

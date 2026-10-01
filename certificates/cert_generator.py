@@ -1,3 +1,4 @@
+import argparse
 import ipaddress
 import requests
 import socket
@@ -22,6 +23,8 @@ class Config:
         self.internal_directory :str = None
         self.collector_port :int = None
         self.use_tls : bool = None
+        self.command_host :str = None
+        self.command_port :int = None
 
         if not os.path.exists(filename):
             print(f"Configuration file {filename} cannot be found locally.")
@@ -54,6 +57,7 @@ class Config:
 
         try:
             self.collector_port = int(self.collector_port)
+            self.command_port   = int(self.command_port)
             self.use_tls = self.use_tls.lower() == 'true'
         except (AttributeError, TypeError, ValueError):
             return
@@ -439,21 +443,21 @@ class CertGenerator:
 
 
 
-    def run_renewal_loop(self, command_port, command_host="127.0.0.1"):
+    def run_renewal_loop(self):
         """Check certificates daily and listen for UDP renewal commands.
 
         Sending the exact ASCII command ``reload-certs`` forces an immediate
         renewal, independently of the certificate's remaining lifetime.
         """
         try:
-            command_port = int(command_port)
+            command_port = int(self.config.command_port)
         except (TypeError, ValueError) as error:
             raise ValueError("command_port must be an integer") from error
         if not 1 <= command_port <= 65535:
             raise ValueError("command_port must be between 1 and 65535")
 
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as command_socket:
-            command_socket.bind((command_host, command_port))
+            command_socket.bind((self.config.command_host, command_port))
             next_certificate_check = time.monotonic()
 
             while True:
@@ -610,3 +614,47 @@ class CertGenerator:
             raise RuntimeError(
                 "Signer returned a certificate without clientAuth EKU"
             )
+
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate and renew the BMP proxy TLS certificate"
+    )
+    parser.add_argument(
+        "config_file",
+        nargs="?",
+        default="proxy.conf",
+        help="configuration file to use (default: proxy.conf)",
+    )
+    arguments = parser.parse_args()
+
+    certificate_generator = CertGenerator(arguments.config_file)
+    cert_dir = certificate_generator.config.internal_directory
+    if not cert_dir:
+        raise RuntimeError("internal_directory is not configured")
+
+    certificate_paths = (
+        os.path.join(cert_dir, "client.key"),
+        os.path.join(cert_dir, "client.crt"),
+        os.path.join(cert_dir, "ca.crt"),
+    )
+    existing_paths = [os.path.isfile(path) for path in certificate_paths]
+
+    if not any(existing_paths):
+        certificate_generator.generate_first_cert()
+    elif not all(existing_paths):
+        missing_paths = [
+            path for path, exists in zip(certificate_paths, existing_paths)
+            if not exists
+        ]
+        raise RuntimeError(
+            "Incomplete certificate state; missing: " + ", ".join(missing_paths)
+        )
+
+    certificate_generator.run_renewal_loop()
+
+
+
+if __name__ == "__main__":
+    main()

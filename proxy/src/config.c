@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <getopt.h>
+#include <errno.h>
+#include <strings.h>
 
 #include "../include/config.h"
 #include "../include/common.h"
@@ -86,10 +88,64 @@ static void Config_set_defaults(Config_t *cfg)
 
 /* ----------------------- LIST PARSER ----------------------- */
 
-static int parse_comma_int_list(const char *str, char *out)
+static int parse_comma_asn_list(const char *str, Blacklist_t *out)
 {
-    strncpy(out, str, MAX_CHAR_DIRECTORY-1);
-    return 1;
+    char *copy = strdup(str);
+    if (!copy)
+        return -1;
+
+    char *saveptr = NULL;
+    for (char *token = strtok_r(copy, ",", &saveptr); token;
+         token = strtok_r(NULL, ",", &saveptr)) {
+        token = trim(token);
+        char *end = NULL;
+        errno = 0;
+        unsigned long long asn = strtoull(token, &end, 10);
+        if (!*token || errno || *trim(end) || asn > UINT32_MAX ||
+            Blacklist_add_asn(out, (uint32_t)asn) < 0) {
+            free(copy);
+            return -1;
+        }
+    }
+    free(copy);
+    return 0;
+}
+
+static int parse_comma_ip_list(const char *str, Blacklist_t *out)
+{
+    char *copy = strdup(str);
+    if (!copy)
+        return -1;
+
+    char *saveptr = NULL;
+    for (char *token = strtok_r(copy, ",", &saveptr); token;
+         token = strtok_r(NULL, ",", &saveptr)) {
+        token = trim(token);
+        if (!*token || Blacklist_add_ip(out, token) < 0) {
+            free(copy);
+            return -1;
+        }
+    }
+    free(copy);
+    return 0;
+}
+
+void Config_cleanup(void)
+{
+    Blacklist_free(config.blacklisted_asns);
+    Blacklist_free(config.blacklisted_ips);
+    config.blacklisted_asns = NULL;
+    config.blacklisted_ips = NULL;
+}
+
+bool Config_is_asn_blacklisted(uint32_t asn)
+{
+    return Blacklist_contains_asn(config.blacklisted_asns, asn);
+}
+
+bool Config_is_ip_blacklisted(const SS *ip)
+{
+    return Blacklist_contains_ip(config.blacklisted_ips, ip);
 }
 
 /* ----------------------- MAIN CONFIG PARSER ----------------------- */
@@ -102,12 +158,18 @@ int Config_read(const char *file)
         return -1;
     }
 
+    Config_cleanup();
     Config_set_defaults(&config);
+    config.blacklisted_asns = Blacklist_new();
+    config.blacklisted_ips = Blacklist_new();
+    if (!config.blacklisted_asns || !config.blacklisted_ips) {
+        _ERROR("Unable to allocate configuration blacklists\n");
+        Config_cleanup();
+        fclose(f);
+        return -1;
+    }
 
     char line[2048];
-    int mode = 0; /* 1=BGP / 2=BMP */
-    int peer_index = 0;
-
     while (fgets(line, sizeof(line), f)) {
 
         char *s = trim(line);
@@ -119,6 +181,7 @@ int Config_read(const char *file)
         if (!split_param(s, &param, &value)) {
             fprintf(stderr, "Invalid line: %s\n", s);
             fclose(f);
+            Config_cleanup();
             return -1;
         }
 
@@ -141,8 +204,46 @@ int Config_read(const char *file)
         else if (strcmp(param, "collector_port") == 0) {
             config.remote_port = atoi(value);
         }
+        else if (strcmp(param, "command_host") == 0) {
+            ip_to_sockaddr(value, &config.command_addr, 0);
+            strncpy(config.command_addr_string, value, MAX_IP_LENGTH-1);
+        }
+        else if (strcmp(param, "command_port") == 0) {
+            config.command_port = atoi(value);
+        }
         else if (strcmp(param, "use_tls") == 0)
             config.use_tls = atoi(value);
+        else if (strcmp(param, "blacklisted_asns") == 0) {
+            if (parse_comma_asn_list(value, config.blacklisted_asns) < 0) {
+                fprintf(stderr, "Invalid blacklisted_asns value: %s\n", value);
+                fclose(f);
+                Config_cleanup();
+                return -1;
+            }
+        }
+        else if (strcmp(param, "blaclisted_ips") == 0 ||
+                 strcmp(param, "blacklisted_ips") == 0) {
+            if (parse_comma_ip_list(value, config.blacklisted_ips) < 0) {
+                fprintf(stderr, "Invalid %s value: %s\n", param, value);
+                fclose(f);
+                Config_cleanup();
+                return -1;
+            }
+        }
+        else if (strcmp(param, "proto") == 0) {
+            if (strcasecmp(value, "bgp") == 0)
+                config.proto = PROTOCOL_BGP;
+            else if (strcasecmp(value, "bmp") == 0)
+                config.proto = PROTOCOL_BMP;
+            else {
+                fprintf(stderr, "Invalid proto value: %s (expected bgp or bmp)\n", value);
+                fclose(f);
+                Config_cleanup();
+                return -1;
+            }
+            config.proto_configured = True;
+        }
+    }
 
     fclose(f);
 
@@ -154,6 +255,7 @@ int Config_read(const char *file)
         config.remote_port == 0)
     {
         _ERROR("Missing mandatory general parameters\n");
+        Config_cleanup();
         return -1;
     }
 
