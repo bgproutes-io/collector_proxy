@@ -9,6 +9,7 @@
 #include "../include/timers.h"
 
 DECLARE_LLIST_CORE_FUNC(raw_message, Raw_message_t *)
+Proxy_server_t* global_server;
 
 
 static int64_t monotonic_milliseconds(void)
@@ -102,6 +103,22 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
 
     proxy->proto = cfg->proto;
 
+    if (proxy->proto == PROTOCOL_BGP)
+    {
+        proxy->use_bmp_filters = False;
+    }
+    else
+    {
+        if (cfg->blacklisted_asns->count + cfg->blacklisted_ips->count)
+        {
+            proxy->use_bmp_filters = True;
+        }
+        else
+        {
+            proxy->use_bmp_filters = False;
+        }
+    }
+
     /* Setup the network utils */
     memcpy(&proxy->remote_addr, &cfg->remote_addr, sizeof(SS));
     memcpy(&proxy->local_addr, &cfg->local_addr, sizeof(SS));
@@ -133,6 +150,35 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
         return NULL;
     }
 
+    /* Create the socket for the commands */
+    memcpy(&proxy->local_command_addr, &cfg->command_addr, sizeof(SS));
+
+    sockaddr_set_port(&proxy->local_command_addr, cfg->command_port);
+
+    proxy->listen_command_sock = socket(proxy->local_command_addr.ss_family, SOCK_STREAM, 0);
+    if (proxy->listen_command_sock == -1)
+    {
+        ERROR(LOG_LEVEL_ALWAYS, "Unable to create the command listen TCP socket.");
+        Proxy_server_free(proxy);
+        return NULL;
+    }
+
+    addrLen = (proxy->local_command_addr.ss_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+    if (bind(proxy->listen_command_sock, (SA*)&proxy->local_command_addr, addrLen) == -1)
+    {
+        ERROR(LOG_LEVEL_ALWAYS, "Unable to bind the command listen socket.");
+        Proxy_server_free(proxy);
+        return NULL;
+    }
+
+    if (listen(proxy->listen_command_sock, 3) == -1)
+    {
+        ERROR(LOG_LEVEL_ALWAYS, "Unable to activate the command listening of the incoming connection socket.");
+        Proxy_server_free(proxy);
+        return NULL;
+    }
+
+    /* Try to connect the data soket to the remote collector */
     if (Proxy_server_connect(proxy) != 0)
     {
         Timer_list_add_tail(timers, &Proxy_server_connect, proxy, 10, TIMER_PERIODICAL);
@@ -161,6 +207,9 @@ void Proxy_server_free(Proxy_server_t* proxy)
         close(proxy->router_data_sock);
     if (proxy->listen_sock >= 0)
         close(proxy->listen_sock);
+
+    Blacklist_free(proxy->cfg->blacklisted_asns);
+    Blacklist_free(proxy->cfg->blacklisted_ips);
 
     Proxy_server_clear_message_queue(proxy);
     SSL_CTX_free(proxy->ssl_ctx);
@@ -316,19 +365,19 @@ int Proxy_server_connect(Proxy_server_t *proxy)
     if (!proxy)
     {
         errno = EINVAL;
-        return -1;
+        return 0;
     }
 
     if (proxy->collector_connected)
     {
-        return 0;
+        return 1;
     }
 
     if (proxy->remote_addr.ss_family != AF_INET &&
         proxy->remote_addr.ss_family != AF_INET6)
     {
         errno = EINVAL;
-        return -1;
+        return 0;
     }
 
     /* Treat an established descriptor as an idempotent successful connect. */
@@ -340,12 +389,12 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         : DEFAULT_PROXY_CONNECT_TIMEOUT_MS;
     int64_t started = monotonic_milliseconds();
     if (started < 0)
-        return -1;
+        return 0;
     int64_t deadline = started + timeout_ms;
 
     int sock = socket(proxy->remote_addr.ss_family, SOCK_STREAM, 0);
     if (sock < 0)
-        return -1;
+        return 0;
 
     int original_flags = fcntl(sock, F_GETFL, 0);
     if (original_flags < 0 || fcntl(sock, F_SETFL, original_flags | O_NONBLOCK) < 0)
@@ -353,7 +402,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         int saved_errno = errno;
         close(sock);
         errno = saved_errno;
-        return -1;
+        return 0;
     }
 
     socklen_t addr_len = proxy->remote_addr.ss_family == AF_INET
@@ -366,7 +415,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         int saved_errno = errno;
         close(sock);
         errno = saved_errno;
-        return -1;
+        return 0;
     }
 
     if (connect_result < 0)
@@ -388,7 +437,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             int saved_errno = socket_error ? socket_error : errno;
             close(sock);
             errno = saved_errno;
-            return -1;
+            return 0;
         }
     }
 
@@ -399,7 +448,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         {
             close(sock);
             errno = EINVAL;
-            return -1;
+            return 0;
         }
 
         ssl = SSL_new(proxy->ssl_ctx);
@@ -410,7 +459,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
                 SSL_free(ssl);
             close(sock);
             errno = EPROTO;
-            return -1;
+            return 0;
         }
 
         for (;;) {
@@ -430,7 +479,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
                 SSL_free(ssl);
                 close(sock);
                 errno = EPROTO;
-                return -1;
+                return 0;
             }
 
             int wait_result = wait_for_socket(sock, events, deadline);
@@ -447,7 +496,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             SSL_free(ssl);
             close(sock);
             errno = EPROTO;
-            return -1;
+            return 0;
         }
     }
 
@@ -458,11 +507,45 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             SSL_free(ssl);
         close(sock);
         errno = saved_errno;
-        return -1;
+        return 0;
     }
 
     proxy->collector_connected = True;
     proxy->collector_data_sock = sock;
     proxy->ssl = ssl;
+
+    Proxy_server_empty_queued_messages(proxy);
+
+    return 1;
+}
+
+
+
+int Proxy_server_close_collector(Proxy_server_t* proxy)
+{
+    if (proxy->use_ssl)
+    {
+        if (proxy->ssl)
+        {
+            SSL_shutdown(proxy->ssl);
+            SSL_free(proxy->ssl);
+            proxy->ssl = NULL;
+        }
+    }
+
+    close(proxy->collector_data_sock);
+    proxy->collector_data_sock = -1;
+
+    proxy->collector_connected = False;
+    Timer_list_add_tail(timers, &Proxy_server_connect, proxy, 10, TIMER_PERIODICAL);
+
     return 0;
 }
+
+
+
+void Proxy_server_process_router_message(Proxy_server_t* proxy, char* buf, int buf_len)
+{
+
+}
+

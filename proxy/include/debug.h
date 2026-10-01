@@ -30,14 +30,14 @@ Debugger_t;
 
 #define DEBUG(val, ...)                                             \
     if (val <= global_debug.logLevel) {                             \
-        write_logs(BLUE, "DEBUG", NULL, NULL, __VA_ARGS__);         \
+        write_logs(BLUE, "DEBUG", __VA_ARGS__);         \
     }
 
 
 
 #define WARNING(val, ...)                                           \
     if (val <= global_debug.logLevel) {                             \
-        write_logs(YELLOW, "WARNING", NULL, NULL, __VA_ARGS__);     \
+        write_logs(YELLOW, "WARNING", __VA_ARGS__);     \
     }
 
 
@@ -45,14 +45,14 @@ Debugger_t;
 
 #define ERROR(val, ...)                                             \
     if (val <= global_debug.logLevel) {                             \
-        write_logs(RED, "ERROR", NULL, NULL, __VA_ARGS__);          \
+        write_logs(RED, "ERROR", __VA_ARGS__);          \
     }
 
 
 
 #define BUG_REPORT(val, ...)                                            \
     if (val <= global_debug.logLevel) {                                 \
-        write_logs(MAGENTA, "BUG_REPORT", NULL, NULL, __VA_ARGS__);     \
+        write_logs(MAGENTA, "BUG_REPORT", __VA_ARGS__);     \
     }
 
 

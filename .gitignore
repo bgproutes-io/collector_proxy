@@ -27,3 +27,4 @@ proxy/*.txt
 proxy/*.bin
 proxy/*.guess
 proxy/*.sub
+proxy/tests/.deps
