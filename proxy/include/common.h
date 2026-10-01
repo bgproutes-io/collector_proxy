@@ -121,4 +121,10 @@
 #define MAX_STRING_BUFF_LEN ATTR_BUFF_LEN * 2
 
 
+typedef enum {
+    PROTOCOL_BGP = 0,
+    PROTOCOL_BMP
+} Peering_protocol_t;
+
+
 #endif

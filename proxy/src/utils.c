@@ -83,3 +83,29 @@ int ip_to_sockaddr(const char *ip_str, SS *addr, int port)
 }
 
 
+
+int sockaddr_set_port(SS *addr, int listen_port)
+{
+    if (!addr)
+    {
+        return -1;
+    }
+
+    if (addr->ss_family == AF_INET)
+    {
+        struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
+        addr_in->sin_port = htons(listen_port);
+        return 0;
+    }
+
+    else
+    {
+        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)addr;
+        addr_in6->sin6_port = htons(listen_port);
+        return 0;
+    }
+
+    /* Invalid IP address format */
+    return -1;
+}
+

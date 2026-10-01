@@ -56,5 +56,7 @@ ssize_t send_no_sigpipe(int sock, const void *buf, size_t len, int flags);
 /** Parse an IPv4 or IPv6 literal into sockaddr_storage. */
 int ip_to_sockaddr(const char *ip_str, SS *addr, int port);
 
+int sockaddr_set_port(SS *addr, int listen_port);
+
 
 #endif /* __UTILS_H__ */

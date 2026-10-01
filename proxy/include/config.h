@@ -66,11 +66,6 @@ extern int option_command_parser(int argc, char** argv);
 #define DEFAULT_CLIENT_KEY          "client.key"
 #define DEFAULT_CA_CRT              "ca.crt"
 
-typedef enum {
-    PROTOCOL_BGP = 0,
-    PROTOCOL_BMP
-} Peering_protocol_t;
-
 
 /* ========================================================================== */
 /*                               MAIN CONFIG STRUCT                            */
