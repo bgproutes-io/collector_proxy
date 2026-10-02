@@ -5,6 +5,7 @@
 #include "utils.h"
 #include "config.h"
 #include "llist.h"
+#include "circular_buffer.h"
 
 #define DEFAULT_PROXY_CONNECT_TIMEOUT_MS 1000U
 
@@ -52,7 +53,8 @@ typedef struct proxy_server_s
     /* BMP-only information */
     raw_message_llist_t *message_queue;
     uint64_t queued_message_bytes;
-
+    circBuf_t buffer;
+    int consecutive_parsing_errors;
 }
 Proxy_server_t;
 
@@ -93,5 +95,23 @@ void Proxy_server_empty_queued_messages(Proxy_server_t* proxy);
 int Proxy_server_send(Proxy_server_t* proxy, const void* buf, int size);
 int Proxy_server_read(Proxy_server_t* proxy, void* buf, int buf_size);
 int Proxy_server_close_collector(Proxy_server_t* proxy);
+
+
+/**
+ * @brief BMP parsing succeeded.
+ */
+#define MSG_PARSING_OK                  0
+/**
+ * @brief Insufficient bytes in buffer to parse a BMP message.
+ */
+#define FAIL_READ_MSG_TOO_FEW_DATA      1
+/**
+ * @brief Parsing error (malformed BMP content).
+ */
+#define FAIL_READ_MSG_PARSING_ERROR     2
+/**
+ * @brief Transport closed by remote router.
+ */
+#define FAIL_READ_REMOTE_DISCONNECT     3
 
 #endif

@@ -7,6 +7,7 @@
 #include "../include/debug.h"
 #include "../include/my_tls.h"
 #include "../include/timers.h"
+#include "BMP_parse.h"
 
 DECLARE_LLIST_CORE_FUNC(raw_message, Raw_message_t *)
 Proxy_server_t* global_server;
@@ -570,8 +571,291 @@ int Proxy_server_close_collector(Proxy_server_t* proxy)
 
 
 
-void Proxy_server_process_router_message(Proxy_server_t* proxy,
-                                         uint8_t* buf, int buf_len)
+int Proxy_server_skip_openBMP_header(Proxy_server_t* proxy)
 {
+    int nbNewLine = 0, nread = 0;
+    circBuf_t* buf = &proxy->buffer;
+    uint8_t ver_maj, ver_min;
+    uint16_t u16;
 
+    /* Skip this header if we do not have enough to read */
+    if (buf->actLen < 4)
+    {
+        return 0;
+    }
+
+    /* If we have an OpenBMP ASCII header */
+    if (CircBuf_get_8_without_reading(buf) == 'V')
+    {
+        /* Iterate until we find double new line (i.e., end of OpenBMP 
+            ASCII header) */
+        while (buf->actLen > 0)
+        {
+            if (nbNewLine == 2)
+            {
+                return nread;
+            }
+            
+            /* Do not really read in case there is not enough data in the
+                circular buffer for full message */
+            if (CircBuf_read_8(buf) == '\n')
+            {
+                nbNewLine++;
+            }
+            else
+            {
+                nbNewLine = 0;
+            }
+            nread++;
+        }
+
+        CircBuf_backward_cursor(buf, nread);
+        return -1;
+    }
+
+    /* Get the first 4 bytes to see if we have  */
+    char start_msg[5];
+    memset(start_msg, 0, 5);
+    CircBuf_get_without_reading(buf, (uint8_t*)start_msg, 4);
+
+    if (memcmp(start_msg, "OBMP", 4) != 0)
+    {
+        /* In this case, we consider that this is not an OpenBMP message,
+            but rather a regular one */
+        return 0;
+    }
+    CircBuf_forward_cursor(buf, 4);
+    nread += 4;
+
+    /* Get version information */
+    ver_maj = CircBuf_read_8(buf);
+    ver_min = CircBuf_read_8(buf);
+    nread += 2;
+
+    UNUSED(ver_maj);
+    UNUSED(ver_min);
+
+    /* Check if we have enough to read, at least until the header length */
+    u16 = CircBuf_read_16(buf);
+    nread += 2;
+
+    if ((uint32_t)(u16 - nread) > buf->actLen)
+    {
+        /* In this case, we do not have enough data to read full OpenBMP header */
+        CircBuf_backward_cursor(buf, nread);
+        return -1;
+    }
+
+    /* For now ignore the header, no useful information inside */
+    CircBuf_forward_cursor(buf, u16 - nread);
+    nread = u16;
+
+    return nread;
+}
+
+
+
+BMP_parsed_msg_t* Proxy_server_read_one_message(Proxy_server_t* proxy, uint8_t* reason, char** msgBytes, uint32_t* msgSize)
+{
+    int ret = Proxy_server_skip_openBMP_header(proxy);
+
+    /* In case there is an OpenBMP header, but we do not have enough 
+        data to read it entirely */
+    if (ret == -1)
+    {
+        (*reason) = FAIL_READ_MSG_TOO_FEW_DATA;
+        return NULL;
+    }
+
+    circBuf_t* buf = &proxy->buffer;
+
+    if (buf->actLen < 5)
+    {
+        (*reason) = FAIL_READ_MSG_TOO_FEW_DATA;
+        return NULL;
+    }
+
+    uint8_t version  = CircBuf_read_8(buf);
+    (*msgSize) = CircBuf_read_32(buf);
+    CircBuf_backward_cursor(buf, 5);
+
+    if ((*msgSize) < 6)
+    {
+        WARNING(LOG_LEVEL_IMPORTANT, "We received a BMP message with an invalid length '%u'. Version read is %d.", (*msgSize), version);
+        CircBuf_forward_cursor(buf, 1);
+        (*reason) = FAIL_READ_MSG_PARSING_ERROR;
+        return NULL;
+    }
+
+    /* We do not have enough data to read, skipping */
+    if (buf->actLen < (*msgSize))
+    {
+        WARNING(LOG_LEVEL_TOO_MUCH, "We do not have enough to read %u vs %u", buf->actLen, (*msgSize));
+        if ((*msgSize) > MAX_BGP_MESSAGE_SIZE * 2)
+        {
+            WARNING(LOG_LEVEL_IMPORTANT, "We received a surprisingly long message of size '%u'. Version read is %d.", (*msgSize), version);
+            CircBuf_reset(buf);
+            // exit(1);
+        }
+        (*reason) = FAIL_READ_MSG_TOO_FEW_DATA;
+        return NULL;
+    }
+
+    /* Check version */
+    if (version != 3)
+    {
+        /* Wrong version, skip message */
+        WARNING(LOG_LEVEL_TOO_MUCH, "Version is not correct");
+        CircBuf_forward_cursor(buf, (*msgSize));
+        (*reason) = FAIL_READ_MSG_PARSING_ERROR;
+        return NULL;
+    }
+
+    /* Get the full message in the form of a buffer */
+    (*msgBytes) = calloc((*msgSize), sizeof(uint8_t));
+    if (!(*msgBytes))
+    {
+        ERROR(LOG_LEVEL_IMPORTANT, "Unable to allocate BMP message buffer of size %u.", (*msgSize));
+        CircBuf_forward_cursor(buf, (*msgSize));
+        (*reason) = FAIL_READ_MSG_PARSING_ERROR;
+        return NULL;
+    }
+
+    CircBuf_read_n(buf, (*msgBytes), (*msgSize));
+    (*reason) = MSG_PARSING_OK;
+    BMP_parsed_msg_t* msg = BMP_parsed_msg_from_bytes((*msgBytes), (*msgSize));
+
+    if (!msg)
+    {
+        (*reason) = FAIL_READ_MSG_PARSING_ERROR;
+    }
+
+    return msg;
+}
+
+
+
+void Proxy_server_process_filtered_message(Proxy_server_t* proxy, uint8_t* buf, int buf_len)
+{
+    circBuf_t* cbuf = &proxy->buffer;
+    CircBuf_write(cbuf, buf, buf_len);
+
+    BMP_parsed_msg_t* msg = NULL;
+    uint8_t reason;
+    uint32_t msgSize;
+    uint8_t* msgBytes = NULL;
+
+    /* While there is at least one possible BMP message in the buffer */
+    while (cbuf->actLen >= 5)
+    {
+        msg = Proxy_server_read_one_message(proxy, &reason, &msgBytes, &msgSize);
+
+        /* In case we were not able to read the message */
+        if (!msg)
+        {
+            /* Switch action according to the exit reason */
+            if (reason == FAIL_READ_MSG_TOO_FEW_DATA)
+            {
+                return;
+            }
+            else if (reason == FAIL_READ_MSG_PARSING_ERROR)
+            {
+                WARNING(LOG_LEVEL_ALWAYS, "Failed to parse the BMP message.");
+                proxy->consecutive_parsing_errors++;
+            }
+            else
+            {
+                WARNING(LOG_LEVEL_IMPORTANT, "Cannot parse message for another reason.");
+                proxy->consecutive_parsing_errors++;
+            }
+
+            if (proxy->consecutive_parsing_errors >= MAX_CONSECUTIVE_PARSING_ERRORS)
+            {
+                close(proxy->router_data_sock);
+                CircBuf_reset(&proxy->buffer);
+                proxy->router_data_sock = -1;
+                proxy->router_connected = False;
+                return;
+            }
+
+            free(msgBytes);
+        }
+
+        /* In case parsing was successful */
+        else
+        {
+            if (!Blacklist_contains_asn(proxy->cfg->blacklisted_asns, msg->peer_asn) && 
+                !Blacklist_contains_ip(proxy->cfg->blacklisted_ips, msg->peer_addr))
+            {
+                if (Proxy_server_send(proxy, msgBytes, msgSize) == -1)
+                {
+                    BMP_parsed_msg_free(msg);
+                    free(msgBytes);
+                    ERROR(LOG_LEVEL_IMPORTANT, "Error when sending message from queue to the collector.");
+                    Proxy_server_close_collector(proxy);
+                    return;
+                }
+            }
+            
+            free(msgBytes);
+            BMP_parsed_msg_free(msg);
+        }
+    }
+}
+
+
+
+/* Queue flushing is intentionally outside this unit test's scope. */
+void Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
+{
+    Raw_message_t* message = NULL;
+    while (proxy->message_queue->count)
+    {
+        message = Proxy_server_dequeue_message(proxy);
+        
+        if (proxy->use_bmp_filters)
+        {
+            Proxy_server_process_filtered_message(proxy, message->data, message->length);
+        }
+        else
+        {
+            if (Proxy_server_send(proxy, message->data, message->length) == -1)
+            {
+                ERROR(LOG_LEVEL_IMPORTANT, "Error when sending message from queue to the collector.");
+                Raw_message_free(message);
+                Proxy_server_close_collector(proxy);
+                return;
+            }
+        }
+
+        Raw_message_free(message);
+    }
+}
+
+
+
+void Proxy_server_process_router_message(Proxy_server_t* proxy, uint8_t* buf, int buf_len)
+{
+    /* In case the collector is connected already, we can forward it */
+    if (proxy->collector_connected)
+    {
+        /* In this case we are using BMP and some filters, need more processing */
+        if (proxy->use_bmp_filters)
+        {
+            Proxy_server_process_filtered_message(proxy, buf, buf_len);
+        }
+        else
+        {
+            if (Proxy_server_send(proxy, buf, buf_len) == -1)
+            {
+                ERROR(LOG_LEVEL_IMPORTANT, "Error when forwarding message to the collector.");
+                Proxy_server_close_collector(proxy);
+                return;
+            }
+        }
+    }
+    else    /* Case where the collector is not connected yet */
+    {
+        Proxy_server_queue_message(proxy, buf, buf_len);
+    }
 }

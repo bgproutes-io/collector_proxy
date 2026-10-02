@@ -58,5 +58,7 @@ int ip_to_sockaddr(const char *ip_str, SS *addr, int port);
 
 int sockaddr_set_port(SS *addr, int listen_port);
 
+uint64_t my_pow(uint64_t x, uint64_t y);
+
 
 #endif /* __UTILS_H__ */

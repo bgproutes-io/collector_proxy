@@ -7,11 +7,7 @@
 #include "proxy_server.h"
 
 
-/* Queue flushing is intentionally outside this unit test's scope. */
-void Proxy_server_empty_queued_messages(Proxy_server_t *server)
-{
-    (void)server;
-}
+
 
 
 static void test_plain_connect(void)

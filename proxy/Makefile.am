@@ -1,7 +1,7 @@
 # Automake input Makefile.am
 
 bin_PROGRAMS = proxy
-check_PROGRAMS = test_config test_message_queue test_timers
+check_PROGRAMS = test_circular_buffer test_config test_message_queue test_timers
 TESTS = $(check_PROGRAMS)
 
 AM_CPPFLAGS = -I$(srcdir)/include $(OPENSSL_CFLAGS) $(LIBBMPROUTES_CFLAGS)
@@ -15,10 +15,12 @@ proxy_SOURCES = proxy.c \
                 src/timers.c \
                 src/commands_def.c \
                 src/commands.c \
+                src/circular_buffer.c \
                 src/debug.c \
                 src/utils.c \
                 include/commands_def.h \
                 include/commands.h \
+                include/circular_buffer.h \
                 include/common.h \
                 include/config.h \
                 include/blacklist.h \
@@ -30,6 +32,14 @@ proxy_SOURCES = proxy.c \
                 include/utils.h
 
 proxy_LDADD = $(OPENSSL_LIBS) $(DL_LIBS) @LIBBMPROUTES_LIBS@
+
+test_circular_buffer_SOURCES = tests/test_circular_buffer.c \
+                               src/circular_buffer.c \
+                               src/utils.c \
+                               include/circular_buffer.h \
+                               include/common.h \
+                               include/utils.h
+test_circular_buffer_LDADD = $(OPENSSL_LIBS)
 
 test_config_SOURCES = tests/test_config.c \
                       src/config.c \

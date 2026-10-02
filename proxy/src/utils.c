@@ -109,3 +109,13 @@ int sockaddr_set_port(SS *addr, int listen_port)
     return -1;
 }
 
+
+uint64_t my_pow(uint64_t x, uint64_t y)
+{
+    uint64_t ret = 1;
+
+    for (uint64_t i = 0; i < y; i++)
+        ret *= x;
+
+    return ret;
+}
