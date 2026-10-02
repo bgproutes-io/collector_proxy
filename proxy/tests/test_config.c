@@ -29,6 +29,7 @@ int main(void)
                  "proto: BmP\n");
 
     assert(Config_read(valid_path) == 0);
+    assert(config.debug_level == DEFAULT_DEBUG_LEVEL);
     assert(config.proto_configured);
     assert(config.proto == PROTOCOL_BMP);
     assert(config.blacklisted_asns->count == 2);
@@ -41,7 +42,12 @@ int main(void)
     assert(Config_is_ip_blacklisted(&ip));
     assert(ip_to_sockaddr("2001:db8::feed", &ip, 1234) == 0);
     assert(Config_is_ip_blacklisted(&ip));
+    char endpoint[80];
+    assert(sockaddr_to_string(&ip, endpoint, sizeof(endpoint)) == 0);
+    assert(strcmp(endpoint, "[2001:db8::feed]:1234") == 0);
     assert(ip_to_sockaddr("192.0.2.2", &ip, 0) == 0);
+    assert(sockaddr_to_string(&ip, endpoint, sizeof(endpoint)) == 0);
+    assert(strcmp(endpoint, "192.0.2.2:0") == 0);
     assert(!Config_is_ip_blacklisted(&ip));
     unlink(valid_path);
 

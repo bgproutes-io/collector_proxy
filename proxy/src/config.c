@@ -80,6 +80,7 @@ static void Config_set_defaults(Config_t *cfg)
 {
     memset(cfg, 0, sizeof(Config_t));
 
+    cfg->debug_level = DEFAULT_DEBUG_LEVEL;
     strcpy(cfg->client_crt, DEFAULT_CLIENT_CRT);
     strcpy(cfg->client_key, DEFAULT_CLIENT_KEY);
     strcpy(cfg->ca_crt, DEFAULT_CA_CRT);
@@ -154,7 +155,8 @@ int Config_read(const char *file)
 {
     FILE *f = fopen(file, "r");
     if (!f) {
-        fprintf(stderr, "Could not open config file: %s\n", file);
+        fprintf(stderr, "proxy config error: unable to open '%s': %s (%d)\n",
+                file, strerror(errno), errno);
         return -1;
     }
 
@@ -163,14 +165,18 @@ int Config_read(const char *file)
     config.blacklisted_asns = Blacklist_new();
     config.blacklisted_ips = Blacklist_new();
     if (!config.blacklisted_asns || !config.blacklisted_ips) {
-        _ERROR("Unable to allocate configuration blacklists\n");
+        fprintf(stderr,
+                "proxy config error: unable to allocate blacklist state: %s (%d)\n",
+                strerror(errno), errno);
         Config_cleanup();
         fclose(f);
         return -1;
     }
 
     char line[2048];
+    unsigned int line_number = 0;
     while (fgets(line, sizeof(line), f)) {
+        line_number++;
 
         char *s = trim(line);
         if (*s == 0 || *s == '#')
@@ -179,7 +185,9 @@ int Config_read(const char *file)
         /* ---- PARAMETER LINE ---- */
         char *param, *value;
         if (!split_param(s, &param, &value)) {
-            fprintf(stderr, "Invalid line: %s\n", s);
+            fprintf(stderr,
+                    "proxy config error: file=%s line=%u: expected key:value, got '%s'\n",
+                    file, line_number, s);
             fclose(f);
             Config_cleanup();
             return -1;
@@ -215,7 +223,9 @@ int Config_read(const char *file)
             config.use_tls = atoi(value);
         else if (strcmp(param, "blacklisted_asns") == 0) {
             if (parse_comma_asn_list(value, config.blacklisted_asns) < 0) {
-                fprintf(stderr, "Invalid blacklisted_asns value: %s\n", value);
+                fprintf(stderr,
+                        "proxy config error: file=%s line=%u: invalid blacklisted_asns value '%s'\n",
+                        file, line_number, value);
                 fclose(f);
                 Config_cleanup();
                 return -1;
@@ -224,7 +234,9 @@ int Config_read(const char *file)
         else if (strcmp(param, "blaclisted_ips") == 0 ||
                  strcmp(param, "blacklisted_ips") == 0) {
             if (parse_comma_ip_list(value, config.blacklisted_ips) < 0) {
-                fprintf(stderr, "Invalid %s value: %s\n", param, value);
+                fprintf(stderr,
+                        "proxy config error: file=%s line=%u: invalid %s value '%s'\n",
+                        file, line_number, param, value);
                 fclose(f);
                 Config_cleanup();
                 return -1;
@@ -236,7 +248,9 @@ int Config_read(const char *file)
             else if (strcasecmp(value, "bmp") == 0)
                 config.proto = PROTOCOL_BMP;
             else {
-                fprintf(stderr, "Invalid proto value: %s (expected bgp or bmp)\n", value);
+                fprintf(stderr,
+                        "proxy config error: file=%s line=%u: invalid proto '%s' (expected bgp or bmp)\n",
+                        file, line_number, value);
                 fclose(f);
                 Config_cleanup();
                 return -1;
@@ -254,7 +268,13 @@ int Config_read(const char *file)
         config.remote_addr_string[0] == 0 ||
         config.remote_port == 0)
     {
-        _ERROR("Missing mandatory general parameters\n");
+        fprintf(stderr,
+                "proxy config error: file=%s: missing mandatory value(s):%s%s%s%s\n",
+                file,
+                config.local_addr_string[0] ? "" : " local_addr",
+                config.local_port ? "" : " local_port",
+                config.remote_addr_string[0] ? "" : " collector_ip",
+                config.remote_port ? "" : " collector_port");
         Config_cleanup();
         return -1;
     }

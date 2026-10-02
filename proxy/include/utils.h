@@ -58,6 +58,9 @@ int ip_to_sockaddr(const char *ip_str, SS *addr, int port);
 
 int sockaddr_set_port(SS *addr, int listen_port);
 
+/** Format an IPv4/IPv6 socket address as "address:port". */
+int sockaddr_to_string(const SS *addr, char *dest, size_t dest_size);
+
 uint64_t my_pow(uint64_t x, uint64_t y);
 
 

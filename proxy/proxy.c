@@ -6,6 +6,15 @@
 #include "include/timers.h"
 #include "include/proxy_server.h"
 
+static void socket_peer_string(int socket_fd, char *dest, size_t dest_size)
+{
+    SS address = {0};
+    socklen_t length = sizeof(address);
+    if (socket_fd < 0 ||
+        getpeername(socket_fd, (SA *)&address, &length) < 0 ||
+        sockaddr_to_string(&address, dest, dest_size) < 0)
+        snprintf(dest, dest_size, "<unknown-peer>");
+}
 
 
 int main_prepare_select_sockets(int* max_sock, fd_set* socks)
@@ -53,22 +62,38 @@ int main(int argc, char** argv)
 {
     if (option_command_parser(argc, argv) == -1)
     {
-        printf("Unable to parse the option command line. Please check the help.\n");
+        fprintf(stderr,
+                "proxy startup error: invalid command line; expected --config <path>\n");
         return EXIT_FAILURE;
     }
 
     /* Parse the configuration file */
     if (Config_read(opt.configFile) == -1)
     {
-        printf("Error when parsing the configuration file, go fix it!\n");
+        fprintf(stderr,
+                "proxy startup error: configuration '%s' is invalid\n",
+                opt.configFile);
         return EXIT_FAILURE;
     }
 
     /* Initialize the debug file */
     init_debug(config.log_file, config.debug_level);
+    INFO(LOG_LEVEL_IMPORTANT,
+         "Starting collector proxy: config=%s, log_level=%s (%d), pid=%ld",
+         opt.configFile, log_level_name(global_debug.logLevel),
+         global_debug.logLevel, (long)getpid());
 
     /* Initialize the values for the timers */
     timers = Timer_list_new();
+    if (!timers)
+    {
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to initialize background timer queue: %s (%d)",
+              strerror(errno), errno);
+        finish_debug();
+        Config_cleanup();
+        return EXIT_FAILURE;
+    }
     struct timeval tv;
     tv.tv_usec = 0;
 
@@ -119,7 +144,9 @@ int main(int argc, char** argv)
             {
                 continue;
             }
-            ERROR(LOG_LEVEL_ALWAYS, "Error on select: '%s'.", strerror(errno));
+            ERROR(LOG_LEVEL_IMPORTANT,
+                  "Event loop select failed: %s (%d); continuing",
+                  strerror(errno), errno);
             continue;
         }
 
@@ -131,10 +158,22 @@ int main(int argc, char** argv)
             global_server->router_data_sock = accept(global_server->listen_sock, (SA*)&tmp_addr, &len);
             if (global_server->router_data_sock != -1)
             {
-                DEBUG(LOG_LEVEL_IMPORTANT, "Router correctly connected to the proxy.");
+                char peer[INET6_ADDRSTRLEN + 16];
+                socket_peer_string(global_server->router_data_sock, peer,
+                                   sizeof(peer));
+                INFO(LOG_LEVEL_IMPORTANT,
+                     "Router connected: peer=%s, fd=%d, protocol=%s",
+                     peer, global_server->router_data_sock,
+                     global_server->proto == PROTOCOL_BMP ? "BMP" : "BGP");
                 CircBuf_reset(&global_server->buffer);
                 global_server->consecutive_parsing_errors = 0;
                 global_server->router_connected = True;
+            }
+            else
+            {
+                WARNING(LOG_LEVEL_IMPORTANT,
+                        "Unable to accept router connection: %s (%d)",
+                        strerror(errno), errno);
             }
         }
 
@@ -146,11 +185,20 @@ int main(int argc, char** argv)
 
             if (size > 0)
             {
+                DEBUG(LOG_LEVEL_TOO_MUCH,
+                      "Received router data: bytes=%zd, buffered_bmp_bytes=%u",
+                      size, global_server->buffer.actLen);
                 Proxy_server_process_router_message(global_server, buf, size);
             }
             else if (size == 0)
             {
-                WARNING(LOG_LEVEL_IMPORTANT, "Connection with the router is down.");
+                char peer[INET6_ADDRSTRLEN + 16];
+                socket_peer_string(global_server->router_data_sock, peer,
+                                   sizeof(peer));
+                WARNING(LOG_LEVEL_IMPORTANT,
+                        "Router disconnected cleanly: peer=%s, "
+                        "discarding_buffered_bmp_bytes=%u",
+                        peer, global_server->buffer.actLen);
                 close(global_server->router_data_sock);
                 CircBuf_reset(&global_server->buffer);
                 global_server->consecutive_parsing_errors = 0;
@@ -161,7 +209,14 @@ int main(int argc, char** argv)
             {
                 if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
                 {
-                    ERROR(LOG_LEVEL_ALWAYS, "We received an error when receiving BMP messages: '%s'.", strerror(errno));
+                    char peer[INET6_ADDRSTRLEN + 16];
+                    socket_peer_string(global_server->router_data_sock, peer,
+                                       sizeof(peer));
+                    ERROR(LOG_LEVEL_IMPORTANT,
+                          "Router receive failed: peer=%s, error=%s (%d), "
+                          "discarding_buffered_bmp_bytes=%u; closing connection",
+                          peer, strerror(errno), errno,
+                          global_server->buffer.actLen);
                     close(global_server->router_data_sock);
                     CircBuf_reset(&global_server->buffer);
                     global_server->consecutive_parsing_errors = 0;
@@ -179,16 +234,34 @@ int main(int argc, char** argv)
 
             if (size == 0)
             {
-                WARNING(LOG_LEVEL_IMPORTANT, "Connection with the collector is down.");
+                char endpoint[INET6_ADDRSTRLEN + 16] = {0};
+                sockaddr_to_string(&global_server->remote_addr, endpoint,
+                                   sizeof(endpoint));
+                WARNING(LOG_LEVEL_IMPORTANT,
+                        "Collector disconnected cleanly: endpoint=%s; "
+                        "automatic reconnect will be scheduled",
+                        endpoint);
                 Proxy_server_close_collector(global_server);
             }
             else if (size < 0)
             {
                 if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
                 {
-                    ERROR(LOG_LEVEL_ALWAYS, "We received an error when receiving BMP messages: '%s'.", strerror(errno));
+                    char endpoint[INET6_ADDRSTRLEN + 16] = {0};
+                    sockaddr_to_string(&global_server->remote_addr, endpoint,
+                                       sizeof(endpoint));
+                    ERROR(LOG_LEVEL_IMPORTANT,
+                          "Collector receive failed: endpoint=%s, error=%s (%d); "
+                          "closing connection and scheduling reconnect",
+                          endpoint, strerror(errno), errno);
                     Proxy_server_close_collector(global_server);
                 }
+            }
+            else
+            {
+                DEBUG(LOG_LEVEL_OPTIONAL,
+                      "Received %zd unexpected bytes from collector; ignored",
+                      size);
             }
         }
 
@@ -200,8 +273,19 @@ int main(int argc, char** argv)
             global_server->command_data_sock = accept(global_server->listen_command_sock, (SA*)&tmp_addr, &len);
             if (global_server->command_data_sock != -1)
             {
-                DEBUG(LOG_LEVEL_IMPORTANT, "Command helper correctly connected to the proxy.");
+                char peer[INET6_ADDRSTRLEN + 16];
+                socket_peer_string(global_server->command_data_sock, peer,
+                                   sizeof(peer));
+                INFO(LOG_LEVEL_IMPORTANT,
+                     "Command client connected: peer=%s, fd=%d",
+                     peer, global_server->command_data_sock);
                 global_server->command_connected = True;
+            }
+            else
+            {
+                WARNING(LOG_LEVEL_IMPORTANT,
+                        "Unable to accept command connection: %s (%d)",
+                        strerror(errno), errno);
             }
         }
 
@@ -213,11 +297,16 @@ int main(int argc, char** argv)
 
             if (size > 0)
             {
-
+                DEBUG(LOG_LEVEL_TOO_MUCH,
+                      "Received command data: bytes=%zd", size);
             }
             else if (size == 0)
             {
-                WARNING(LOG_LEVEL_OPTIONAL, "Connection with the command shell is down.");
+                char peer[INET6_ADDRSTRLEN + 16];
+                socket_peer_string(global_server->command_data_sock, peer,
+                                   sizeof(peer));
+                INFO(LOG_LEVEL_OPTIONAL,
+                     "Command client disconnected: peer=%s", peer);
                 close(global_server->command_data_sock);
                 global_server->command_data_sock = -1;
                 global_server->command_connected = False;
@@ -226,7 +315,13 @@ int main(int argc, char** argv)
             {
                 if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
                 {
-                    ERROR(LOG_LEVEL_ALWAYS, "We received an error when receiving command: '%s'.", strerror(errno));
+                    char peer[INET6_ADDRSTRLEN + 16];
+                    socket_peer_string(global_server->command_data_sock, peer,
+                                       sizeof(peer));
+                    ERROR(LOG_LEVEL_IMPORTANT,
+                          "Command receive failed: peer=%s, error=%s (%d); "
+                          "closing connection",
+                          peer, strerror(errno), errno);
                     close(global_server->command_data_sock);
                     global_server->command_data_sock = -1;
                     global_server->command_connected = False;

@@ -12,11 +12,62 @@
 DECLARE_LLIST_CORE_FUNC(raw_message, Raw_message_t *)
 Proxy_server_t* global_server;
 
+static const char *protocol_name(Peering_protocol_t protocol)
+{
+    return protocol == PROTOCOL_BMP ? "BMP" : "BGP";
+}
+
+static void endpoint_string(const SS *address, char *dest, size_t size)
+{
+    if (sockaddr_to_string(address, dest, size) < 0 && dest[0] == '\0')
+        snprintf(dest, size, "<unknown>");
+}
+
+static int collector_connect_failure(Proxy_server_t *proxy,
+                                     const char *stage, int result)
+{
+    int saved_errno = errno ? errno : EIO;
+    char endpoint[INET6_ADDRSTRLEN + 16] = {0};
+    endpoint_string(&proxy->remote_addr, endpoint, sizeof(endpoint));
+    proxy->consecutive_collector_connect_failures++;
+
+    int level = proxy->consecutive_collector_connect_failures == 1 ||
+                proxy->consecutive_collector_connect_failures % 6 == 0
+        ? LOG_LEVEL_IMPORTANT : LOG_LEVEL_OPTIONAL;
+    unsigned long tls_code = ERR_peek_last_error();
+    if (tls_code) {
+        char tls_detail[256];
+        ERR_error_string_n(tls_code, tls_detail, sizeof(tls_detail));
+        WARNING(level,
+                "Collector connection failed during %s: endpoint=%s, "
+                "tls=%s, attempt=%u, error=%s (%d), tls_error=%s; "
+                "collector remains offline",
+                stage, endpoint, proxy->use_ssl ? "enabled" : "disabled",
+                proxy->consecutive_collector_connect_failures,
+                strerror(saved_errno), saved_errno, tls_detail);
+    } else {
+        WARNING(level,
+                "Collector connection failed during %s: endpoint=%s, "
+                "tls=%s, attempt=%u, error=%s (%d); collector remains offline",
+                stage, endpoint, proxy->use_ssl ? "enabled" : "disabled",
+                proxy->consecutive_collector_connect_failures,
+                strerror(saved_errno), saved_errno);
+    }
+    errno = saved_errno;
+    return result;
+}
+
 
 static int reconnect_collector(void *arg)
 {
     Proxy_server_t *proxy = arg;
 
+    DEBUG(LOG_LEVEL_OPTIONAL,
+          "Attempting scheduled collector reconnect; queued_messages=%u, "
+          "queued_bytes=%llu, buffered_bmp_bytes=%u",
+          llist_count(proxy->message_queue),
+          (unsigned long long)proxy->queued_message_bytes,
+          proxy->buffer.actLen);
     /* Periodical timers repeat on zero and are removed on nonzero. */
     return Proxy_server_connect(proxy) == 0 ? 1 : 0;
 }
@@ -29,7 +80,18 @@ static void schedule_collector_reconnect(Proxy_server_t *proxy)
         return;
     }
 
-    Timer_list_add_tail(timers, reconnect_collector, proxy, 10, TIMER_PERIODICAL);
+    if (!Timer_list_add_tail(timers, reconnect_collector, proxy, 10,
+                             TIMER_PERIODICAL))
+    {
+        ERROR(LOG_LEVEL_IMPORTANT,
+              "Unable to schedule collector reconnect; automatic recovery "
+              "is disabled");
+    }
+    else
+    {
+        INFO(LOG_LEVEL_IMPORTANT,
+             "Collector reconnect scheduled every 10 seconds");
+    }
 }
 
 
@@ -100,7 +162,8 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
     Proxy_server_t* proxy = calloc(1, sizeof(Proxy_server_t));
     if (!proxy)
     {
-        ERROR(LOG_LEVEL_ALWAYS, "Unable to allocate memory for structure 'Proxy_server_t'.");
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to allocate proxy state: %s (%d)", strerror(errno), errno);
         return NULL;
     }
 
@@ -115,7 +178,9 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
 
     if (!proxy->message_queue)
     {
-        ERROR(LOG_LEVEL_ALWAYS, "Unable to allocate memory for structure 'Proxy_server_t->message_queue'.");
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to allocate the offline message queue: %s (%d)",
+              strerror(errno), errno);
         Proxy_server_free(proxy);
         return NULL;
     }
@@ -134,7 +199,10 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
 
         if (!proxy->ssl_ctx)
         {
-            ERROR(LOG_LEVEL_ALWAYS, "Unable to create the TLS context for the proxy.");
+            ERROR(LOG_LEVEL_ALWAYS,
+                  "Unable to initialize collector TLS using client_cert=%s, "
+                  "client_key=%s, ca_cert=%s",
+                  cfg->client_crt, cfg->client_key, cfg->ca_crt);
             Proxy_server_free(proxy);
             return NULL;
         }
@@ -167,11 +235,19 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
     sockaddr_set_port(&proxy->remote_addr, cfg->remote_port);
     sockaddr_set_port(&proxy->local_addr, cfg->local_port);
 
+    char local_endpoint[INET6_ADDRSTRLEN + 16] = {0};
+    char collector_endpoint[INET6_ADDRSTRLEN + 16] = {0};
+    endpoint_string(&proxy->local_addr, local_endpoint, sizeof(local_endpoint));
+    endpoint_string(&proxy->remote_addr, collector_endpoint,
+                    sizeof(collector_endpoint));
+
     /* Create the socket that listens for connections from the router */
     proxy->listen_sock = socket(proxy->local_addr.ss_family, SOCK_STREAM, 0);
     if (proxy->listen_sock == -1)
     {
-        ERROR(LOG_LEVEL_ALWAYS, "Unable to create the listen TCP socket.");
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to create router listen socket for %s: %s (%d)",
+              local_endpoint, strerror(errno), errno);
         Proxy_server_free(proxy);
         return NULL;
     }
@@ -179,14 +255,18 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
     size_t addrLen = (proxy->local_addr.ss_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
     if (bind(proxy->listen_sock, (SA*)&proxy->local_addr, addrLen) == -1)
     {
-        ERROR(LOG_LEVEL_ALWAYS, "Unable to bind the listen socket.");
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to bind router listen socket to %s: %s (%d)",
+              local_endpoint, strerror(errno), errno);
         Proxy_server_free(proxy);
         return NULL;
     }
 
     if (listen(proxy->listen_sock, 3) == -1)
     {
-        ERROR(LOG_LEVEL_ALWAYS, "Unable to activate the listening of the incoming connection socket.");
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to listen for router connections on %s: %s (%d)",
+              local_endpoint, strerror(errno), errno);
         Proxy_server_free(proxy);
         return NULL;
     }
@@ -196,10 +276,16 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
 
     sockaddr_set_port(&proxy->local_command_addr, cfg->command_port);
 
+    char command_endpoint[INET6_ADDRSTRLEN + 16] = {0};
+    endpoint_string(&proxy->local_command_addr, command_endpoint,
+                    sizeof(command_endpoint));
+
     proxy->listen_command_sock = socket(proxy->local_command_addr.ss_family, SOCK_STREAM, 0);
     if (proxy->listen_command_sock == -1)
     {
-        ERROR(LOG_LEVEL_ALWAYS, "Unable to create the command listen TCP socket.");
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to create command listen socket for %s: %s (%d)",
+              command_endpoint, strerror(errno), errno);
         Proxy_server_free(proxy);
         return NULL;
     }
@@ -207,14 +293,18 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
     addrLen = (proxy->local_command_addr.ss_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
     if (bind(proxy->listen_command_sock, (SA*)&proxy->local_command_addr, addrLen) == -1)
     {
-        ERROR(LOG_LEVEL_ALWAYS, "Unable to bind the command listen socket.");
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to bind command listen socket to %s: %s (%d)",
+              command_endpoint, strerror(errno), errno);
         Proxy_server_free(proxy);
         return NULL;
     }
 
     if (listen(proxy->listen_command_sock, 3) == -1)
     {
-        ERROR(LOG_LEVEL_ALWAYS, "Unable to activate the command listening of the incoming connection socket.");
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to listen for command connections on %s: %s (%d)",
+              command_endpoint, strerror(errno), errno);
         Proxy_server_free(proxy);
         return NULL;
     }
@@ -224,6 +314,17 @@ Proxy_server_t* Proxy_server_new(Config_t* cfg)
     {
         schedule_collector_reconnect(proxy);
     }
+
+    INFO(LOG_LEVEL_IMPORTANT,
+         "Proxy ready: protocol=%s, router_listener=%s, collector=%s, "
+         "tls=%s, bmp_filtering=%s, blacklisted_asns=%zu, "
+         "blacklisted_ips=%zu, command_listener=%s",
+         protocol_name(proxy->proto), local_endpoint, collector_endpoint,
+         proxy->use_ssl ? "enabled" : "disabled",
+         proxy->use_bmp_filters ? "enabled" : "disabled",
+         cfg->blacklisted_asns ? cfg->blacklisted_asns->count : 0,
+         cfg->blacklisted_ips ? cfg->blacklisted_ips->count : 0,
+         command_endpoint);
 
     return proxy;
 }
@@ -489,11 +590,15 @@ int Proxy_server_connect(Proxy_server_t *proxy)
     if (!proxy)
     {
         errno = EINVAL;
+        ERROR(LOG_LEVEL_IMPORTANT,
+              "Collector connection requested with a NULL proxy state");
         return -1;
     }
 
     if (proxy->collector_connected)
     {
+        DEBUG(LOG_LEVEL_TOO_MUCH,
+              "Collector connection request ignored: already connected");
         return 0;
     }
 
@@ -501,14 +606,14 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         proxy->remote_addr.ss_family != AF_INET6)
     {
         errno = EINVAL;
-        return -1;
+        return collector_connect_failure(proxy, "address validation", -1);
     }
 
     /* A descriptor without the connected state is inconsistent. */
     if (proxy->collector_data_sock >= 0)
     {
         errno = EALREADY;
-        return -1;
+        return collector_connect_failure(proxy, "socket state validation", -1);
     }
 
     uint32_t timeout_ms = proxy->connect_timeout_ms
@@ -517,7 +622,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
     int64_t started = monotonic_milliseconds();
     if (started < 0)
     {
-        return -1;
+        return collector_connect_failure(proxy, "monotonic clock read", -1);
     }
 
     int64_t deadline = started + timeout_ms;
@@ -525,7 +630,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
     int sock = socket(proxy->remote_addr.ss_family, SOCK_STREAM, 0);
     if (sock < 0)
     {
-        return -1;
+        return collector_connect_failure(proxy, "socket creation", -1);
     }
 
     int original_flags = fcntl(sock, F_GETFL, 0);
@@ -534,7 +639,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         int saved_errno = errno;
         close(sock);
         errno = saved_errno;
-        return -1;
+        return collector_connect_failure(proxy, "nonblocking socket setup", -1);
     }
 
     socklen_t addr_len = proxy->remote_addr.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
@@ -545,7 +650,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         int saved_errno = errno;
         close(sock);
         errno = saved_errno;
-        return -1;
+        return collector_connect_failure(proxy, "TCP connect", -1);
     }
 
     if (connect_result < 0)
@@ -556,7 +661,8 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             int saved_errno = wait_result == 1 ? ETIMEDOUT : errno;
             close(sock);
             errno = saved_errno;
-            return wait_result;
+            return collector_connect_failure(proxy, "TCP connect wait",
+                                             wait_result);
         }
 
         int socket_error = 0;
@@ -566,7 +672,8 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             int saved_errno = socket_error ? socket_error : errno;
             close(sock);
             errno = saved_errno;
-            return -1;
+            return collector_connect_failure(proxy, "TCP connect completion",
+                                             -1);
         }
     }
 
@@ -577,18 +684,18 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         {
             close(sock);
             errno = EINVAL;
-            return -1;
+            return collector_connect_failure(proxy, "TLS context validation",
+                                             -1);
         }
 
         ssl = SSL_new(proxy->ssl_ctx);
         if (!ssl || SSL_set_fd(ssl, sock) != 1)
         {
-            ERR_print_errors_fp(stderr);
             if (ssl)
                 SSL_free(ssl);
             close(sock);
             errno = EPROTO;
-            return -1;
+            return collector_connect_failure(proxy, "TLS session setup", -1);
         }
 
         for (;;)
@@ -612,11 +719,10 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             }
             else
             {
-                ERR_print_errors_fp(stderr);
                 SSL_free(ssl);
                 close(sock);
                 errno = EPROTO;
-                return -1;
+                return collector_connect_failure(proxy, "TLS handshake", -1);
             }
 
             int wait_result = wait_for_socket(sock, events, deadline);
@@ -626,7 +732,8 @@ int Proxy_server_connect(Proxy_server_t *proxy)
                 SSL_free(ssl);
                 close(sock);
                 errno = saved_errno;
-                return wait_result;
+                return collector_connect_failure(proxy, "TLS handshake wait",
+                                                 wait_result);
             }
         }
 
@@ -635,7 +742,9 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             SSL_free(ssl);
             close(sock);
             errno = EPROTO;
-            return -1;
+            return collector_connect_failure(proxy,
+                                             "TLS certificate verification",
+                                             -1);
         }
     }
 
@@ -649,7 +758,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             
         close(sock);
         errno = saved_errno;
-        return -1;
+        return collector_connect_failure(proxy, "blocking socket restore", -1);
     }
 
     proxy->collector_connected = True;
@@ -661,6 +770,16 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         return -1;
     }
 
+    char endpoint[INET6_ADDRSTRLEN + 16] = {0};
+    endpoint_string(&proxy->remote_addr, endpoint, sizeof(endpoint));
+    INFO(LOG_LEVEL_IMPORTANT,
+         "Collector connected: endpoint=%s, tls=%s, fd=%d, "
+         "queued_messages=%u, queued_bytes=%llu",
+         endpoint, proxy->use_ssl ? "enabled" : "disabled",
+         proxy->collector_data_sock, llist_count(proxy->message_queue),
+         (unsigned long long)proxy->queued_message_bytes);
+    proxy->consecutive_collector_connect_failures = 0;
+
     return 0;
 }
 
@@ -668,6 +787,11 @@ int Proxy_server_connect(Proxy_server_t *proxy)
 
 int Proxy_server_close_collector(Proxy_server_t* proxy)
 {
+    if (!proxy)
+        return -1;
+
+    char endpoint[INET6_ADDRSTRLEN + 16] = {0};
+    endpoint_string(&proxy->remote_addr, endpoint, sizeof(endpoint));
     if (proxy->use_ssl)
     {
         if (proxy->ssl)
@@ -686,6 +810,12 @@ int Proxy_server_close_collector(Proxy_server_t* proxy)
     proxy->collector_data_sock = -1;
 
     proxy->collector_connected = False;
+    INFO(LOG_LEVEL_OPTIONAL,
+         "Collector connection closed: endpoint=%s, queued_messages=%u, "
+         "queued_bytes=%llu, buffered_bmp_bytes=%u",
+         endpoint, llist_count(proxy->message_queue),
+         (unsigned long long)proxy->queued_message_bytes,
+         proxy->buffer.actLen);
     schedule_collector_reconnect(proxy);
 
     return 0;
@@ -793,7 +923,10 @@ static BMP_parsed_msg_t* Proxy_server_read_one_message(
 
     if ((*msgSize) < 6)
     {
-        WARNING(LOG_LEVEL_IMPORTANT, "We received a BMP message with an invalid length '%u'. Version read is %d.", (*msgSize), version);
+        WARNING(LOG_LEVEL_OPTIONAL,
+                "Malformed BMP header: version=%u, declared_length=%u, "
+                "buffered_bytes=%u; advancing one byte to resynchronize",
+                version, (*msgSize), buf->actLen);
         CircBuf_forward_cursor(buf, 1);
         (*reason) = FAIL_READ_MSG_PARSING_ERROR;
         return NULL;
@@ -802,10 +935,17 @@ static BMP_parsed_msg_t* Proxy_server_read_one_message(
     /* We do not have enough data to read, skipping */
     if (buf->actLen < (*msgSize))
     {
-        WARNING(LOG_LEVEL_TOO_MUCH, "We do not have enough to read %u vs %u", buf->actLen, (*msgSize));
+        DEBUG(LOG_LEVEL_TOO_MUCH,
+              "Waiting for fragmented BMP message: version=%u, "
+              "buffered_bytes=%u, declared_length=%u, missing_bytes=%u",
+              version, buf->actLen, (*msgSize), (*msgSize) - buf->actLen);
         if ((*msgSize) > MAX_BGP_MESSAGE_SIZE * 2)
         {
-            WARNING(LOG_LEVEL_IMPORTANT, "We received a surprisingly long message of size '%u'. Version read is %d.", (*msgSize), version);
+            WARNING(LOG_LEVEL_IMPORTANT,
+                    "Rejected oversized BMP message: version=%u, "
+                    "declared_length=%u, maximum=%u; advancing one byte "
+                    "to resynchronize",
+                    version, (*msgSize), MAX_BGP_MESSAGE_SIZE * 2);
             CircBuf_forward_cursor(buf, 1);
             (*reason) = FAIL_READ_MSG_PARSING_ERROR;
             return NULL;
@@ -818,7 +958,10 @@ static BMP_parsed_msg_t* Proxy_server_read_one_message(
     if (version != 3)
     {
         /* Wrong version, skip message */
-        WARNING(LOG_LEVEL_TOO_MUCH, "Version is not correct");
+        WARNING(LOG_LEVEL_OPTIONAL,
+                "Rejected BMP message with unsupported version=%u, "
+                "length=%u; expected version=3",
+                version, (*msgSize));
         CircBuf_forward_cursor(buf, (*msgSize));
         (*reason) = FAIL_READ_MSG_PARSING_ERROR;
         return NULL;
@@ -828,7 +971,10 @@ static BMP_parsed_msg_t* Proxy_server_read_one_message(
     (*msgBytes) = calloc((*msgSize), sizeof(uint8_t));
     if (!(*msgBytes))
     {
-        ERROR(LOG_LEVEL_IMPORTANT, "Unable to allocate BMP message buffer of size %u.", (*msgSize));
+        ERROR(LOG_LEVEL_IMPORTANT,
+              "Unable to allocate %u bytes for a BMP message: %s (%d); "
+              "discarding this message",
+              (*msgSize), strerror(errno), errno);
         CircBuf_forward_cursor(buf, (*msgSize));
         (*reason) = FAIL_READ_MSG_PARSING_ERROR;
         return NULL;
@@ -865,7 +1011,11 @@ static int Proxy_server_process_filtered_message(Proxy_server_t* proxy,
 
     if ((uint32_t)buf_len > REMAINING_LEN(*cbuf)) 
     {
-        ERROR(LOG_LEVEL_IMPORTANT, "BMP receive buffer overflow (%u buffered, %d incoming).", cbuf->actLen, buf_len);
+        ERROR(LOG_LEVEL_IMPORTANT,
+              "BMP receive buffer overflow: buffered_bytes=%u, "
+              "incoming_bytes=%d, capacity=%u; disconnecting router and "
+              "discarding buffered data",
+              cbuf->actLen, buf_len, MAX_BGP_MESSAGE_SIZE * 2);
         if (proxy->router_data_sock >= 0)
         {
             close(proxy->router_data_sock);
@@ -903,18 +1053,31 @@ static int Proxy_server_process_filtered_message(Proxy_server_t* proxy,
             }
             else if (reason == FAIL_READ_MSG_PARSING_ERROR)
             {
-                WARNING(LOG_LEVEL_ALWAYS, "Failed to parse the BMP message.");
                 proxy->consecutive_parsing_errors++;
+                WARNING(LOG_LEVEL_IMPORTANT,
+                        "BMP parsing failed: consecutive_errors=%d/%d, "
+                        "buffered_bytes=%u; attempting stream resynchronization",
+                        proxy->consecutive_parsing_errors,
+                        MAX_CONSECUTIVE_PARSING_ERRORS, cbuf->actLen);
             }
             else
             {
-                WARNING(LOG_LEVEL_IMPORTANT, "Cannot parse message for another reason.");
                 proxy->consecutive_parsing_errors++;
+                WARNING(LOG_LEVEL_IMPORTANT,
+                        "BMP parsing stopped for unknown reason=%u: "
+                        "consecutive_errors=%d/%d, buffered_bytes=%u",
+                        reason, proxy->consecutive_parsing_errors,
+                        MAX_CONSECUTIVE_PARSING_ERRORS, cbuf->actLen);
             }
 
             if (proxy->consecutive_parsing_errors >= MAX_CONSECUTIVE_PARSING_ERRORS)
             {
-                close(proxy->router_data_sock);
+                ERROR(LOG_LEVEL_IMPORTANT,
+                      "Disconnecting router after %d consecutive BMP parsing "
+                      "errors; discarding %u buffered bytes",
+                      proxy->consecutive_parsing_errors, cbuf->actLen);
+                if (proxy->router_data_sock >= 0)
+                    close(proxy->router_data_sock);
                 CircBuf_reset(&proxy->buffer);
                 proxy->router_data_sock = -1;
                 proxy->router_connected = False;
@@ -935,14 +1098,28 @@ static int Proxy_server_process_filtered_message(Proxy_server_t* proxy,
             {
                 if (Proxy_server_send(proxy, msgBytes, msgSize) == -1)
                 {
+                    int send_errno = errno;
                     /* Retain the complete message for the next connection. */
                     CircBuf_backward_cursor(cbuf, msgSize);
+                    ERROR(LOG_LEVEL_IMPORTANT,
+                          "Unable to forward filtered BMP message: "
+                          "length=%u, peer_asn=%u, peer_address=%s, "
+                          "error=%s (%d); message retained for reconnect",
+                          msgSize, msg->peer_asn, msg->peer_addr_str,
+                          strerror(send_errno), send_errno);
                     BMP_parsed_msg_free(msg);
                     free(msgBytes);
-                    ERROR(LOG_LEVEL_IMPORTANT, "Error when sending message from queue to the collector.");
+                    errno = send_errno;
                     Proxy_server_close_collector(proxy);
                     return FILTER_PROCESS_COLLECTOR_ERROR;
                 }
+            }
+            else
+            {
+                INFO(LOG_LEVEL_OPTIONAL,
+                     "Dropped blacklisted BMP message: length=%u, "
+                     "peer_asn=%u, peer_address=%s",
+                     msgSize, msg->peer_asn, msg->peer_addr_str);
             }
             
             free(msgBytes);
@@ -984,6 +1161,16 @@ int Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
         return 0;
     }
 
+    if (proxy->message_queue->count)
+    {
+        INFO(LOG_LEVEL_OPTIONAL,
+             "Flushing offline queue: messages=%u, bytes=%llu, "
+             "bmp_filtering=%s",
+             proxy->message_queue->count,
+             (unsigned long long)proxy->queued_message_bytes,
+             proxy->use_bmp_filters ? "enabled" : "disabled");
+    }
+
     while (proxy->collector_connected && proxy->message_queue->count)
     {
         Raw_message_t* message = llistnode_data(proxy->message_queue->head);
@@ -994,6 +1181,11 @@ int Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
 
             if (status == FILTER_PROCESS_INPUT_OVERFLOW)
             {
+                ERROR(LOG_LEVEL_IMPORTANT,
+                      "Discarding offline queue after malformed BMP stream: "
+                      "messages=%u, bytes=%llu",
+                      proxy->message_queue->count,
+                      (unsigned long long)proxy->queued_message_bytes);
                 Proxy_server_clear_message_queue(proxy);
                 return 0;
             }
@@ -1010,7 +1202,13 @@ int Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
         {
             if (Proxy_server_send(proxy, message->data, message->length) == -1)
             {
-                ERROR(LOG_LEVEL_IMPORTANT, "Error when sending message from queue to the collector.");
+                ERROR(LOG_LEVEL_IMPORTANT,
+                      "Offline queue flush failed: message_length=%u, "
+                      "remaining_messages=%u, remaining_bytes=%llu, "
+                      "error=%s (%d); queue retained for reconnect",
+                      message->length, proxy->message_queue->count,
+                      (unsigned long long)proxy->queued_message_bytes,
+                      strerror(errno), errno);
                 Proxy_server_close_collector(proxy);
                 return -1;
             }
@@ -1018,6 +1216,8 @@ int Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
             Raw_message_free(message);
         }
     }
+
+    INFO(LOG_LEVEL_OPTIONAL, "Offline queue flush completed");
 
     return 0;
 }
@@ -1038,11 +1238,19 @@ void Proxy_server_process_router_message(Proxy_server_t* proxy, uint8_t* buf, in
         {
             if (Proxy_server_send(proxy, buf, buf_len) == -1)
             {
-                ERROR(LOG_LEVEL_IMPORTANT, "Error when forwarding message to the collector.");
+                int send_errno = errno;
+                ERROR(LOG_LEVEL_IMPORTANT,
+                      "Collector forwarding failed: bytes=%d, error=%s (%d); "
+                      "closing collector connection and queueing data",
+                      buf_len, strerror(send_errno), send_errno);
 
                 if (Proxy_server_queue_message(proxy, buf, buf_len) < 0)
                 {
-                    ERROR(LOG_LEVEL_IMPORTANT, "Unable to queue the message after send failure.");
+                    ERROR(LOG_LEVEL_ALWAYS,
+                          "Data loss: unable to queue %d bytes after collector "
+                          "send failure; queued_messages=%u, queued_bytes=%llu",
+                          buf_len, llist_count(proxy->message_queue),
+                          (unsigned long long)proxy->queued_message_bytes);
                 }
         
                 Proxy_server_close_collector(proxy);
@@ -1054,7 +1262,19 @@ void Proxy_server_process_router_message(Proxy_server_t* proxy, uint8_t* buf, in
     {
         if (Proxy_server_queue_message(proxy, buf, buf_len) < 0)
         {
-            ERROR(LOG_LEVEL_IMPORTANT, "Unable to queue a message while the collector is offline.");
+            ERROR(LOG_LEVEL_ALWAYS,
+                  "Data loss: unable to queue %d router bytes while collector "
+                  "is offline; queued_messages=%u, queued_bytes=%llu",
+                  buf_len, llist_count(proxy->message_queue),
+                  (unsigned long long)proxy->queued_message_bytes);
+        }
+        else
+        {
+            DEBUG(LOG_LEVEL_TOO_MUCH,
+                  "Queued router data while collector is offline: "
+                  "chunk_bytes=%d, queued_messages=%u, queued_bytes=%llu",
+                  buf_len, llist_count(proxy->message_queue),
+                  (unsigned long long)proxy->queued_message_bytes);
         }
     }
 }

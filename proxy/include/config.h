@@ -65,6 +65,7 @@ extern int option_command_parser(int argc, char** argv);
 #define DEFAULT_CLIENT_CRT          "client.crt"
 #define DEFAULT_CLIENT_KEY          "client.key"
 #define DEFAULT_CA_CRT              "ca.crt"
+#define DEFAULT_DEBUG_LEVEL         1
 
 
 /* ========================================================================== */

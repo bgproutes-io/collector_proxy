@@ -37,6 +37,7 @@ typedef struct proxy_server_s
     SS remote_addr;
     SS local_addr;
     uint32_t connect_timeout_ms;
+    uint32_t consecutive_collector_connect_failures;
 
     /* Command information */
     int listen_command_sock;

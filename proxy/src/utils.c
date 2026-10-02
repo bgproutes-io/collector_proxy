@@ -110,6 +110,58 @@ int sockaddr_set_port(SS *addr, int listen_port)
 }
 
 
+int sockaddr_to_string(const SS *addr, char *dest, size_t dest_size)
+{
+    if (!addr || !dest || dest_size == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    char address[INET6_ADDRSTRLEN];
+    const void *raw_address;
+    uint16_t port;
+    bool ipv6 = False;
+
+    if (addr->ss_family == AF_INET)
+    {
+        const struct sockaddr_in *addr4 = (const struct sockaddr_in *)addr;
+        raw_address = &addr4->sin_addr;
+        port = ntohs(addr4->sin_port);
+    }
+    else if (addr->ss_family == AF_INET6)
+    {
+        const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *)addr;
+        raw_address = &addr6->sin6_addr;
+        port = ntohs(addr6->sin6_port);
+        ipv6 = True;
+    }
+    else
+    {
+        snprintf(dest, dest_size, "<invalid-address-family:%d>",
+                 addr->ss_family);
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+
+    if (!inet_ntop(addr->ss_family, raw_address, address, sizeof(address)))
+    {
+        snprintf(dest, dest_size, "<unprintable-address>");
+        return -1;
+    }
+
+    int needed = ipv6
+        ? snprintf(dest, dest_size, "[%s]:%u", address, port)
+        : snprintf(dest, dest_size, "%s:%u", address, port);
+    if (needed < 0 || (size_t)needed >= dest_size)
+    {
+        errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
+
 uint64_t my_pow(uint64_t x, uint64_t y)
 {
     uint64_t ret = 1;
