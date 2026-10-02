@@ -89,7 +89,7 @@ void Proxy_server_clear_message_queue(Proxy_server_t *server);
 
 void Proxy_server_process_router_message(Proxy_server_t* proxy,
                                          uint8_t* buf, int buf_len);
-void Proxy_server_empty_queued_messages(Proxy_server_t* proxy);
+int Proxy_server_empty_queued_messages(Proxy_server_t* proxy);
 
 
 int Proxy_server_send(Proxy_server_t* proxy, const void* buf, int size);

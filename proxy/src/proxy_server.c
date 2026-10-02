@@ -25,10 +25,11 @@ static int reconnect_collector(void *arg)
 static void schedule_collector_reconnect(Proxy_server_t *proxy)
 {
     if (!timers || Timer_job_lookup(timers, proxy, reconnect_collector))
+    {
         return;
+    }
 
-    Timer_list_add_tail(timers, reconnect_collector, proxy, 10,
-                        TIMER_PERIODICAL);
+    Timer_list_add_tail(timers, reconnect_collector, proxy, 10, TIMER_PERIODICAL);
 }
 
 
@@ -36,7 +37,10 @@ static int64_t monotonic_milliseconds(void)
 {
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+    {
         return -1;
+    }
+
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
@@ -44,12 +48,18 @@ static int64_t monotonic_milliseconds(void)
 /* Return 0 when ready, 1 on timeout, and -1 on poll/clock errors. */
 static int wait_for_socket(int sock, short events, int64_t deadline)
 {
-    for (;;) {
+    for (;;)
+    {
         int64_t now = monotonic_milliseconds();
         if (now < 0)
+        {
             return -1;
+        }
+
         if (now >= deadline)
+        {
             return 1;
+        }
 
         int64_t remaining = deadline - now;
         int timeout = remaining > INT_MAX ? INT_MAX : (int)remaining;
@@ -59,12 +69,21 @@ static int wait_for_socket(int sock, short events, int64_t deadline)
         };
 
         int result = poll(&descriptor, 1, timeout);
+
         if (result > 0)
+        {
             return 0;
+        }
+
         if (result == 0)
+        {
             return 1;
+        }
+
         if (errno != EINTR)
+        {
             return -1;
+        }
     }
 }
 
@@ -224,15 +243,29 @@ void Proxy_server_free(Proxy_server_t* proxy)
         SSL_free(proxy->ssl);
     }
     if (proxy->collector_data_sock >= 0)
+    {
         close(proxy->collector_data_sock);
+    }
+        
     if (proxy->router_data_sock >= 0)
+    {
         close(proxy->router_data_sock);
+    }
+        
     if (proxy->listen_sock >= 0)
+    {
         close(proxy->listen_sock);
+    }
+        
     if (proxy->command_data_sock >= 0)
+    {
         close(proxy->command_data_sock);
+    }
+        
     if (proxy->listen_command_sock >= 0)
+    {
         close(proxy->listen_command_sock);
+    }
 
     Proxy_server_clear_message_queue(proxy);
     SSL_CTX_free(proxy->ssl_ctx);
@@ -244,7 +277,10 @@ void Proxy_server_free(Proxy_server_t* proxy)
 void Raw_message_free(Raw_message_t *message)
 {
     if (!message)
+    {
         return;
+    }
+
     free(message->data);
     free(message);
 }
@@ -255,28 +291,39 @@ int Proxy_server_queue_message(Proxy_server_t *server,
                                const void *data, size_t length)
 {
     if (!server || (!data && length) || length > MAX_BGP_MESSAGE_SIZE)
+    {
         return -1;
+    }
 
-    if (!server->message_queue) {
+    if (!server->message_queue)
+    {
         server->message_queue = raw_message_llist_new(&Raw_message_free, NULL);
         if (!server->message_queue)
+        {
             return -1;
+        }
     }
 
     Raw_message_t *message = calloc(1, sizeof(*message));
     if (!message)
+    {
         return -1;
+    }
+
     message->length = (uint32_t)length;
-    if (length) {
+    if (length)
+    {
         message->data = malloc(length);
-        if (!message->data) {
+        if (!message->data)
+        {
             Raw_message_free(message);
             return -1;
         }
         memcpy(message->data, data, length);
     }
 
-    if (!raw_message_llist_add_tail(server->message_queue, message, False)) {
+    if (!raw_message_llist_add_tail(server->message_queue, message, False))
+    {
         Raw_message_free(message);
         return -1;
     }
@@ -289,11 +336,16 @@ int Proxy_server_queue_message(Proxy_server_t *server,
 Raw_message_t *Proxy_server_dequeue_message(Proxy_server_t *server)
 {
     if (!server || !server->message_queue)
+    {
         return NULL;
+    }
 
     Raw_message_t *message = raw_message_llist_pop_head(server->message_queue);
     if (message)
+    {
         server->queued_message_bytes -= message->length;
+    }
+        
     return message;
 }
 
@@ -302,7 +354,10 @@ Raw_message_t *Proxy_server_dequeue_message(Proxy_server_t *server)
 void Proxy_server_clear_message_queue(Proxy_server_t *server)
 {
     if (!server)
+    {
         return;
+    }
+
     raw_message_llist_free(server->message_queue);
     server->message_queue = NULL;
     server->queued_message_bytes = 0;
@@ -369,16 +424,62 @@ int Proxy_server_read(Proxy_server_t* proxy, void* buf, int buf_size)
 
 int Proxy_server_send(Proxy_server_t* proxy, const void* buf, int size)
 {
-    if (proxy->use_ssl)
+    if (!proxy || size < 0 || (!buf && size > 0))
     {
-        return SSL_write(proxy->ssl, buf, size);
-    }
-    else
-    {
-        return send(proxy->collector_data_sock, buf, size, 0);
+        errno = EINVAL;
+        return -1;
     }
 
-    return -1;
+    int total = 0;
+    while (total < size)
+    {
+        int written;
+        if (proxy->use_ssl) 
+        {
+            ERR_clear_error();
+            written = SSL_write(proxy->ssl, (const uint8_t *)buf + total, size - total);
+
+            if (written <= 0)
+            {
+                int ssl_error = SSL_get_error(proxy->ssl, written);
+                if (ssl_error == SSL_ERROR_SYSCALL && errno == EINTR)
+                {
+                    continue;
+                }
+
+                if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE)
+                {
+                    errno = EAGAIN;
+                }
+                else if (!errno)
+                {
+                    errno = ssl_error == SSL_ERROR_SSL ? EPROTO : EIO;
+                }
+                    
+                return -1;
+            }
+        }
+        else
+        {
+            written = send_no_sigpipe(proxy->collector_data_sock, (const uint8_t *)buf + total, size - total, 0);
+            if (written < 0 && errno == EINTR)
+            {
+                continue;
+            }
+
+            if (written <= 0)
+            {
+                if (written == 0)
+                {
+                    errno = EPIPE;
+                }
+                return -1;
+            }
+        }
+        total += written;
+    }
+
+    return total;
 }
 
 
@@ -415,12 +516,17 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         : DEFAULT_PROXY_CONNECT_TIMEOUT_MS;
     int64_t started = monotonic_milliseconds();
     if (started < 0)
+    {
         return -1;
+    }
+
     int64_t deadline = started + timeout_ms;
 
     int sock = socket(proxy->remote_addr.ss_family, SOCK_STREAM, 0);
     if (sock < 0)
+    {
         return -1;
+    }
 
     int original_flags = fcntl(sock, F_GETFL, 0);
     if (original_flags < 0 || fcntl(sock, F_SETFL, original_flags | O_NONBLOCK) < 0)
@@ -431,9 +537,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
         return -1;
     }
 
-    socklen_t addr_len = proxy->remote_addr.ss_family == AF_INET
-        ? sizeof(struct sockaddr_in)
-        : sizeof(struct sockaddr_in6);
+    socklen_t addr_len = proxy->remote_addr.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
 
     int connect_result = connect(sock, (SA *)&proxy->remote_addr, addr_len);
     if (connect_result < 0 && errno != EINPROGRESS)
@@ -457,8 +561,7 @@ int Proxy_server_connect(Proxy_server_t *proxy)
 
         int socket_error = 0;
         socklen_t error_length = sizeof(socket_error);
-        if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
-                       &socket_error, &error_length) < 0 || socket_error)
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) < 0 || socket_error)
         {
             int saved_errno = socket_error ? socket_error : errno;
             close(sock);
@@ -488,19 +591,27 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             return -1;
         }
 
-        for (;;) {
+        for (;;)
+        {
             ERR_clear_error();
             int result = SSL_connect(ssl);
             if (result == 1)
+            {
                 break;
+            }
 
             int ssl_error = SSL_get_error(ssl, result);
             short events;
             if (ssl_error == SSL_ERROR_WANT_READ)
+            {
                 events = POLLIN;
+            }
             else if (ssl_error == SSL_ERROR_WANT_WRITE)
+            {
                 events = POLLOUT;
-            else {
+            }
+            else
+            {
                 ERR_print_errors_fp(stderr);
                 SSL_free(ssl);
                 close(sock);
@@ -509,7 +620,8 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             }
 
             int wait_result = wait_for_socket(sock, events, deadline);
-            if (wait_result != 0) {
+            if (wait_result != 0)
+            {
                 int saved_errno = wait_result == 1 ? ETIMEDOUT : errno;
                 SSL_free(ssl);
                 close(sock);
@@ -518,7 +630,8 @@ int Proxy_server_connect(Proxy_server_t *proxy)
             }
         }
 
-        if (SSL_get_verify_result(ssl) != X509_V_OK) {
+        if (SSL_get_verify_result(ssl) != X509_V_OK)
+        {
             SSL_free(ssl);
             close(sock);
             errno = EPROTO;
@@ -530,7 +643,10 @@ int Proxy_server_connect(Proxy_server_t *proxy)
     {
         int saved_errno = errno;
         if (ssl)
+        {
             SSL_free(ssl);
+        }
+            
         close(sock);
         errno = saved_errno;
         return -1;
@@ -540,7 +656,10 @@ int Proxy_server_connect(Proxy_server_t *proxy)
     proxy->collector_data_sock = sock;
     proxy->ssl = ssl;
 
-    Proxy_server_empty_queued_messages(proxy);
+    if (Proxy_server_empty_queued_messages(proxy) < 0)
+    {
+        return -1;
+    }
 
     return 0;
 }
@@ -560,7 +679,10 @@ int Proxy_server_close_collector(Proxy_server_t* proxy)
     }
 
     if (proxy->collector_data_sock >= 0)
+    {
         close(proxy->collector_data_sock);
+    }
+
     proxy->collector_data_sock = -1;
 
     proxy->collector_connected = False;
@@ -571,92 +693,77 @@ int Proxy_server_close_collector(Proxy_server_t* proxy)
 
 
 
-int Proxy_server_skip_openBMP_header(Proxy_server_t* proxy)
+static int Proxy_server_skip_openBMP_header(Proxy_server_t* proxy)
 {
-    int nbNewLine = 0, nread = 0;
+    int nbNewLine = 0;
     circBuf_t* buf = &proxy->buffer;
-    uint8_t ver_maj, ver_min;
-    uint16_t u16;
 
-    /* Skip this header if we do not have enough to read */
     if (buf->actLen < 4)
     {
         return 0;
     }
 
-    /* If we have an OpenBMP ASCII header */
     if (CircBuf_get_8_without_reading(buf) == 'V')
     {
-        /* Iterate until we find double new line (i.e., end of OpenBMP 
-            ASCII header) */
-        while (buf->actLen > 0)
-        {
-            if (nbNewLine == 2)
-            {
-                return nread;
-            }
-            
-            /* Do not really read in case there is not enough data in the
-                circular buffer for full message */
-            if (CircBuf_read_8(buf) == '\n')
+        /* Scan without consuming so a fragmented header remains intact. */
+        for (uint32_t i = 0; i < buf->actLen; i++) {
+            uint8_t byte = buf->buf[(buf->actIdxRead + i) % (MAX_BGP_MESSAGE_SIZE * 2)];
+            if (byte == '\n')
             {
                 nbNewLine++;
+                if (nbNewLine == 2)
+                {
+                    CircBuf_forward_cursor(buf, i + 1);
+                    return (int)i + 1;
+                }
             }
             else
             {
                 nbNewLine = 0;
             }
-            nread++;
         }
-
-        CircBuf_backward_cursor(buf, nread);
         return -1;
     }
 
-    /* Get the first 4 bytes to see if we have  */
-    char start_msg[5];
-    memset(start_msg, 0, 5);
-    CircBuf_get_without_reading(buf, (uint8_t*)start_msg, 4);
+    uint8_t start_msg[4];
+    CircBuf_get_without_reading(buf, start_msg, sizeof(start_msg));
 
     if (memcmp(start_msg, "OBMP", 4) != 0)
     {
-        /* In this case, we consider that this is not an OpenBMP message,
-            but rather a regular one */
         return 0;
     }
-    CircBuf_forward_cursor(buf, 4);
-    nread += 4;
+        
 
-    /* Get version information */
-    ver_maj = CircBuf_read_8(buf);
-    ver_min = CircBuf_read_8(buf);
-    nread += 2;
-
-    UNUSED(ver_maj);
-    UNUSED(ver_min);
-
-    /* Check if we have enough to read, at least until the header length */
-    u16 = CircBuf_read_16(buf);
-    nread += 2;
-
-    if ((uint32_t)(u16 - nread) > buf->actLen)
+    if (buf->actLen < 8)
     {
-        /* In this case, we do not have enough data to read full OpenBMP header */
-        CircBuf_backward_cursor(buf, nread);
         return -1;
     }
 
-    /* For now ignore the header, no useful information inside */
-    CircBuf_forward_cursor(buf, u16 - nread);
-    nread = u16;
+    uint8_t header_prefix[8];
+    CircBuf_get_without_reading(buf, header_prefix, sizeof(header_prefix));
+    uint16_t header_length = ((uint16_t)header_prefix[6] << 8) | header_prefix[7];
 
-    return nread;
+    if (header_length < sizeof(header_prefix))
+    {
+        CircBuf_forward_cursor(buf, 1);
+        return -2;
+    }
+    if (buf->actLen < header_length)
+    {
+        return -1;
+    }
+
+    CircBuf_forward_cursor(buf, header_length);
+    return header_length;
 }
 
 
 
-BMP_parsed_msg_t* Proxy_server_read_one_message(Proxy_server_t* proxy, uint8_t* reason, char** msgBytes, uint32_t* msgSize)
+static BMP_parsed_msg_t* Proxy_server_read_one_message(
+    Proxy_server_t* proxy, uint8_t* reason, uint8_t** msgBytes,
+    uint32_t* msgSize)
 {
+    *msgBytes = NULL;
     int ret = Proxy_server_skip_openBMP_header(proxy);
 
     /* In case there is an OpenBMP header, but we do not have enough 
@@ -664,6 +771,11 @@ BMP_parsed_msg_t* Proxy_server_read_one_message(Proxy_server_t* proxy, uint8_t* 
     if (ret == -1)
     {
         (*reason) = FAIL_READ_MSG_TOO_FEW_DATA;
+        return NULL;
+    }
+    if (ret == -2)
+    {
+        (*reason) = FAIL_READ_MSG_PARSING_ERROR;
         return NULL;
     }
 
@@ -694,8 +806,9 @@ BMP_parsed_msg_t* Proxy_server_read_one_message(Proxy_server_t* proxy, uint8_t* 
         if ((*msgSize) > MAX_BGP_MESSAGE_SIZE * 2)
         {
             WARNING(LOG_LEVEL_IMPORTANT, "We received a surprisingly long message of size '%u'. Version read is %d.", (*msgSize), version);
-            CircBuf_reset(buf);
-            // exit(1);
+            CircBuf_forward_cursor(buf, 1);
+            (*reason) = FAIL_READ_MSG_PARSING_ERROR;
+            return NULL;
         }
         (*reason) = FAIL_READ_MSG_TOO_FEW_DATA;
         return NULL;
@@ -735,13 +848,43 @@ BMP_parsed_msg_t* Proxy_server_read_one_message(Proxy_server_t* proxy, uint8_t* 
 
 
 
-void Proxy_server_process_filtered_message(Proxy_server_t* proxy, uint8_t* buf, int buf_len)
+#define FILTER_PROCESS_OK                 0
+#define FILTER_PROCESS_COLLECTOR_ERROR   -1
+#define FILTER_PROCESS_INPUT_OVERFLOW    -2
+
+static int Proxy_server_process_filtered_message(Proxy_server_t* proxy,
+                                                  const uint8_t* buf,
+                                                  int buf_len)
 {
     circBuf_t* cbuf = &proxy->buffer;
-    CircBuf_write(cbuf, buf, buf_len);
+    if (buf_len < 0 || (!buf && buf_len > 0)) 
+    {
+        errno = EINVAL;
+        return FILTER_PROCESS_INPUT_OVERFLOW;
+    }
+
+    if ((uint32_t)buf_len > REMAINING_LEN(*cbuf)) 
+    {
+        ERROR(LOG_LEVEL_IMPORTANT, "BMP receive buffer overflow (%u buffered, %d incoming).", cbuf->actLen, buf_len);
+        if (proxy->router_data_sock >= 0)
+        {
+            close(proxy->router_data_sock);
+        }
+            
+        proxy->router_data_sock = -1;
+        proxy->router_connected = False;
+        proxy->consecutive_parsing_errors = 0;
+        CircBuf_reset(cbuf);
+        return FILTER_PROCESS_INPUT_OVERFLOW;
+    }
+
+    if (buf_len > 0)
+    {
+        CircBuf_write(cbuf, (uint8_t *)buf, (uint32_t)buf_len);
+    }
 
     BMP_parsed_msg_t* msg = NULL;
-    uint8_t reason;
+    uint8_t reason = FAIL_READ_MSG_PARSING_ERROR;
     uint32_t msgSize;
     uint8_t* msgBytes = NULL;
 
@@ -756,7 +899,7 @@ void Proxy_server_process_filtered_message(Proxy_server_t* proxy, uint8_t* buf, 
             /* Switch action according to the exit reason */
             if (reason == FAIL_READ_MSG_TOO_FEW_DATA)
             {
-                return;
+                return FILTER_PROCESS_OK;
             }
             else if (reason == FAIL_READ_MSG_PARSING_ERROR)
             {
@@ -775,61 +918,108 @@ void Proxy_server_process_filtered_message(Proxy_server_t* proxy, uint8_t* buf, 
                 CircBuf_reset(&proxy->buffer);
                 proxy->router_data_sock = -1;
                 proxy->router_connected = False;
-                return;
+                proxy->consecutive_parsing_errors = 0;
+                return FILTER_PROCESS_INPUT_OVERFLOW;
             }
 
             free(msgBytes);
+            msgBytes = NULL;
         }
 
         /* In case parsing was successful */
         else
         {
+            proxy->consecutive_parsing_errors = 0;
             if (!Blacklist_contains_asn(proxy->cfg->blacklisted_asns, msg->peer_asn) && 
                 !Blacklist_contains_ip(proxy->cfg->blacklisted_ips, msg->peer_addr))
             {
                 if (Proxy_server_send(proxy, msgBytes, msgSize) == -1)
                 {
+                    /* Retain the complete message for the next connection. */
+                    CircBuf_backward_cursor(cbuf, msgSize);
                     BMP_parsed_msg_free(msg);
                     free(msgBytes);
                     ERROR(LOG_LEVEL_IMPORTANT, "Error when sending message from queue to the collector.");
                     Proxy_server_close_collector(proxy);
-                    return;
+                    return FILTER_PROCESS_COLLECTOR_ERROR;
                 }
             }
             
             free(msgBytes);
+            msgBytes = NULL;
             BMP_parsed_msg_free(msg);
         }
     }
+
+    return FILTER_PROCESS_OK;
 }
 
 
 
-/* Queue flushing is intentionally outside this unit test's scope. */
-void Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
+int Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
 {
-    Raw_message_t* message = NULL;
-    while (proxy->message_queue->count)
+    if (!proxy)
     {
-        message = Proxy_server_dequeue_message(proxy);
+        return 0;
+    }
+
+    if (proxy->use_bmp_filters)
+    {
+        int status = Proxy_server_process_filtered_message(proxy, NULL, 0);
+
+        if (status == FILTER_PROCESS_COLLECTOR_ERROR)
+        {
+            return -1;
+        }
+            
+        if (status == FILTER_PROCESS_INPUT_OVERFLOW)
+        {
+            Proxy_server_clear_message_queue(proxy);
+            return 0;
+        }
+    }
+
+    if (!proxy->message_queue)
+    {
+        return 0;
+    }
+
+    while (proxy->collector_connected && proxy->message_queue->count)
+    {
+        Raw_message_t* message = llistnode_data(proxy->message_queue->head);
         
         if (proxy->use_bmp_filters)
         {
-            Proxy_server_process_filtered_message(proxy, message->data, message->length);
+            int status = Proxy_server_process_filtered_message(proxy, message->data, message->length);
+
+            if (status == FILTER_PROCESS_INPUT_OVERFLOW)
+            {
+                Proxy_server_clear_message_queue(proxy);
+                return 0;
+            }
+
+            message = Proxy_server_dequeue_message(proxy);
+            Raw_message_free(message);
+
+            if (status == FILTER_PROCESS_COLLECTOR_ERROR)
+            {
+                return -1;
+            }
         }
         else
         {
             if (Proxy_server_send(proxy, message->data, message->length) == -1)
             {
                 ERROR(LOG_LEVEL_IMPORTANT, "Error when sending message from queue to the collector.");
-                Raw_message_free(message);
                 Proxy_server_close_collector(proxy);
-                return;
+                return -1;
             }
+            message = Proxy_server_dequeue_message(proxy);
+            Raw_message_free(message);
         }
-
-        Raw_message_free(message);
     }
+
+    return 0;
 }
 
 
@@ -849,6 +1039,12 @@ void Proxy_server_process_router_message(Proxy_server_t* proxy, uint8_t* buf, in
             if (Proxy_server_send(proxy, buf, buf_len) == -1)
             {
                 ERROR(LOG_LEVEL_IMPORTANT, "Error when forwarding message to the collector.");
+
+                if (Proxy_server_queue_message(proxy, buf, buf_len) < 0)
+                {
+                    ERROR(LOG_LEVEL_IMPORTANT, "Unable to queue the message after send failure.");
+                }
+        
                 Proxy_server_close_collector(proxy);
                 return;
             }
@@ -856,6 +1052,9 @@ void Proxy_server_process_router_message(Proxy_server_t* proxy, uint8_t* buf, in
     }
     else    /* Case where the collector is not connected yet */
     {
-        Proxy_server_queue_message(proxy, buf, buf_len);
+        if (Proxy_server_queue_message(proxy, buf, buf_len) < 0)
+        {
+            ERROR(LOG_LEVEL_IMPORTANT, "Unable to queue a message while the collector is offline.");
+        }
     }
 }

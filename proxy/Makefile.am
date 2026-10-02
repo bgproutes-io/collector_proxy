@@ -54,19 +54,21 @@ test_config_LDADD = $(OPENSSL_LIBS)
 test_message_queue_SOURCES = tests/test_message_queue.c \
                              src/proxy_server.c \
                              src/blacklist.c \
+                             src/circular_buffer.c \
                              src/my_tls.c \
                              src/timers.c \
                              src/debug.c \
                              src/utils.c \
                              include/proxy_server.h \
                              include/blacklist.h \
+                             include/circular_buffer.h \
                              include/my_tls.h \
                              include/timers.h \
                              include/debug.h \
                              include/utils.h \
                              include/llist.h \
                              include/common.h
-test_message_queue_LDADD = $(OPENSSL_LIBS)
+test_message_queue_LDADD = $(OPENSSL_LIBS) @LIBBMPROUTES_LIBS@
 
 test_timers_SOURCES = tests/test_timers.c \
                       src/timers.c \

@@ -132,6 +132,8 @@ int main(int argc, char** argv)
             if (global_server->router_data_sock != -1)
             {
                 DEBUG(LOG_LEVEL_IMPORTANT, "Router correctly connected to the proxy.");
+                CircBuf_reset(&global_server->buffer);
+                global_server->consecutive_parsing_errors = 0;
                 global_server->router_connected = True;
             }
         }
@@ -151,6 +153,7 @@ int main(int argc, char** argv)
                 WARNING(LOG_LEVEL_IMPORTANT, "Connection with the router is down.");
                 close(global_server->router_data_sock);
                 CircBuf_reset(&global_server->buffer);
+                global_server->consecutive_parsing_errors = 0;
                 global_server->router_data_sock = -1;
                 global_server->router_connected = False;
             }
@@ -161,6 +164,7 @@ int main(int argc, char** argv)
                     ERROR(LOG_LEVEL_ALWAYS, "We received an error when receiving BMP messages: '%s'.", strerror(errno));
                     close(global_server->router_data_sock);
                     CircBuf_reset(&global_server->buffer);
+                    global_server->consecutive_parsing_errors = 0;
                     global_server->router_data_sock = -1;
                     global_server->router_connected = False;
                 }
