@@ -161,6 +161,7 @@ static void test_failed_flush_retains_message(void)
 static void test_fragmented_openbmp_header(void)
 {
     Proxy_server_t server = {0};
+    server.proto = PROTOCOL_BMP;
     server.collector_connected = True;
     server.collector_data_sock = -1;
     server.use_bmp_filters = True;
@@ -181,6 +182,7 @@ static void test_filtered_input_overflow_disconnects_router(void)
 {
     Proxy_server_t server = {0};
     uint8_t bytes[] = {1, 2};
+    server.proto = PROTOCOL_BMP;
     server.collector_connected = True;
     server.collector_data_sock = -1;
     server.router_connected = True;
@@ -192,6 +194,56 @@ static void test_filtered_input_overflow_disconnects_router(void)
     assert(server.router_connected == False);
     assert(server.router_data_sock == -1);
     assert(server.buffer.actLen == 0);
+}
+
+static void test_filter_toggle_preserves_fragmented_bmp_message(void)
+{
+    int sockets[2];
+    if (make_tcp_pair(sockets) < 0)
+        return;
+
+    Config_t config = {0};
+    config.blacklisted_asns = Blacklist_new();
+    config.blacklisted_ips = Blacklist_new();
+    assert(config.blacklisted_asns);
+    assert(config.blacklisted_ips);
+
+    Proxy_server_t server = {0};
+    server.proto = PROTOCOL_BMP;
+    server.cfg = &config;
+    server.collector_connected = True;
+    server.collector_data_sock = sockets[0];
+
+    /* A minimal valid BMP initiation message. */
+    const uint8_t message[] = {3, 0, 0, 0, 6, 4};
+    uint8_t received[sizeof(message)] = {0};
+
+    server.use_bmp_filters = False;
+    Proxy_server_process_router_message(&server, (uint8_t *)message, 3);
+    assert(server.buffer.actLen == 3);
+
+    server.use_bmp_filters = True;
+    Proxy_server_process_router_message(&server, (uint8_t *)message + 3, 3);
+    assert(server.buffer.actLen == 0);
+    assert(recv(sockets[1], received, sizeof(received), MSG_WAITALL) ==
+           (ssize_t)sizeof(received));
+    assert(memcmp(received, message, sizeof(message)) == 0);
+
+    memset(received, 0, sizeof(received));
+    Proxy_server_process_router_message(&server, (uint8_t *)message, 3);
+    assert(server.buffer.actLen == 3);
+
+    server.use_bmp_filters = False;
+    Proxy_server_process_router_message(&server, (uint8_t *)message + 3, 3);
+    assert(server.buffer.actLen == 0);
+    assert(recv(sockets[1], received, sizeof(received), MSG_WAITALL) ==
+           (ssize_t)sizeof(received));
+    assert(memcmp(received, message, sizeof(message)) == 0);
+
+    Blacklist_free(config.blacklisted_asns);
+    Blacklist_free(config.blacklisted_ips);
+    close(sockets[0]);
+    close_with_reset(sockets[1]);
 }
 
 static void test_direct_send_failure_queues_message(void)
@@ -224,6 +276,7 @@ int main(void)
     test_direct_send_failure_queues_message();
     test_fragmented_openbmp_header();
     test_filtered_input_overflow_disconnects_router();
+    test_filter_toggle_preserves_fragmented_bmp_message();
 
     Proxy_server_t server = {0};
     const uint8_t first[] = {1, 2, 3, 4};

@@ -73,5 +73,35 @@ int main(void)
     unlink(invalid_path);
 
     Config_cleanup();
+
+    Blacklist_t *list = Blacklist_new();
+    assert(list);
+
+    for (uint32_t asn = 64512; asn < 64576; asn++)
+        assert(Blacklist_add_asn(list, asn) == 0);
+    assert(list->count == 64);
+    assert(Blacklist_del_asn(list, 64544) == 0);
+    assert(!Blacklist_contains_asn(list, 64544));
+    assert(list->count == 63);
+
+    /* Deleting a missing entry is idempotent and does not change the count. */
+    assert(Blacklist_del_asn(list, 64544) == 0);
+    assert(list->count == 63);
+
+    assert(Blacklist_add_ip(list, "192.0.2.10") == 0);
+    assert(Blacklist_add_ip(list, "2001:db8::10") == 0);
+    assert(list->count == 65);
+    assert(Blacklist_del_ip(list, "192.0.2.10") == 0);
+    assert(ip_to_sockaddr("192.0.2.10", &ip, 0) == 0);
+    assert(!Blacklist_contains_ip(list, &ip));
+    assert(Blacklist_del_ip(list, "2001:db8::10") == 0);
+    assert(ip_to_sockaddr("2001:db8::10", &ip, 0) == 0);
+    assert(!Blacklist_contains_ip(list, &ip));
+    assert(list->count == 63);
+
+    assert(Blacklist_del_ip(list, "not-an-ip") == -1);
+    assert(Blacklist_del_ip(list, NULL) == -1);
+    assert(Blacklist_del_asn(NULL, 64512) == -1);
+    Blacklist_free(list);
     return 0;
 }

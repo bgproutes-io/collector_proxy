@@ -998,9 +998,9 @@ static BMP_parsed_msg_t* Proxy_server_read_one_message(
 #define FILTER_PROCESS_COLLECTOR_ERROR   -1
 #define FILTER_PROCESS_INPUT_OVERFLOW    -2
 
-static int Proxy_server_process_filtered_message(Proxy_server_t* proxy,
-                                                  const uint8_t* buf,
-                                                  int buf_len)
+static int Proxy_server_process_bmp_stream(Proxy_server_t* proxy,
+                                           const uint8_t* buf,
+                                           int buf_len)
 {
     circBuf_t* cbuf = &proxy->buffer;
     if (buf_len < 0 || (!buf && buf_len > 0)) 
@@ -1093,8 +1093,21 @@ static int Proxy_server_process_filtered_message(Proxy_server_t* proxy,
         else
         {
             proxy->consecutive_parsing_errors = 0;
-            if (!Blacklist_contains_asn(proxy->cfg->blacklisted_asns, msg->peer_asn) && 
-                !Blacklist_contains_ip(proxy->cfg->blacklisted_ips, msg->peer_addr))
+            SS peer_address = {0};
+            bool ip_blacklisted = False;
+            if (msg->peer_addr_str[0] &&
+                ip_to_sockaddr(msg->peer_addr_str, &peer_address, 0) == 0)
+            {
+                ip_blacklisted = Blacklist_contains_ip(
+                    proxy->cfg->blacklisted_ips, &peer_address);
+            }
+
+            bool message_blacklisted = proxy->use_bmp_filters &&
+                (Blacklist_contains_asn(proxy->cfg->blacklisted_asns,
+                                        msg->peer_asn) ||
+                 ip_blacklisted);
+
+            if (!message_blacklisted)
             {
                 if (Proxy_server_send(proxy, msgBytes, msgSize) == -1)
                 {
@@ -1140,9 +1153,11 @@ int Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
         return 0;
     }
 
-    if (proxy->use_bmp_filters)
+    /* Always preserve BMP message boundaries.  Runtime blacklist commands may
+     * toggle use_bmp_filters while a message is fragmented across TCP reads. */
+    if (proxy->proto == PROTOCOL_BMP)
     {
-        int status = Proxy_server_process_filtered_message(proxy, NULL, 0);
+        int status = Proxy_server_process_bmp_stream(proxy, NULL, 0);
 
         if (status == FILTER_PROCESS_COLLECTOR_ERROR)
         {
@@ -1175,9 +1190,10 @@ int Proxy_server_empty_queued_messages(Proxy_server_t *proxy)
     {
         Raw_message_t* message = llistnode_data(proxy->message_queue->head);
         
-        if (proxy->use_bmp_filters)
+        if (proxy->proto == PROTOCOL_BMP)
         {
-            int status = Proxy_server_process_filtered_message(proxy, message->data, message->length);
+            int status = Proxy_server_process_bmp_stream(
+                proxy, message->data, message->length);
 
             if (status == FILTER_PROCESS_INPUT_OVERFLOW)
             {
@@ -1229,10 +1245,11 @@ void Proxy_server_process_router_message(Proxy_server_t* proxy, uint8_t* buf, in
     /* In case the collector is connected already, we can forward it */
     if (proxy->collector_connected)
     {
-        /* In this case we are using BMP and some filters, need more processing */
-        if (proxy->use_bmp_filters)
+        /* BMP is always framed, even with an empty blacklist, so changing the
+         * blacklist cannot switch parsing modes in the middle of a message. */
+        if (proxy->proto == PROTOCOL_BMP)
         {
-            Proxy_server_process_filtered_message(proxy, buf, buf_len);
+            Proxy_server_process_bmp_stream(proxy, buf, buf_len);
         }
         else
         {

@@ -5,6 +5,7 @@
 #include "include/config.h"
 #include "include/timers.h"
 #include "include/proxy_server.h"
+#include "include/commands_def.h"
 
 static void socket_peer_string(int socket_fd, char *dest, size_t dest_size)
 {
@@ -108,7 +109,13 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
-    int stop = False;
+    /* Install the different commands */
+    commands_init();
+    INSTALL_CMD(exit_server, "exit-server", &exit_server);
+    INSTALL_CMD(add_blacklisted_asn, "add asn <asn> blacklist", &add_blacklisted_asn);
+    INSTALL_CMD(del_blacklisted_asn, "del asn <asn> blacklist", &del_blacklisted_asn);
+    INSTALL_CMD(add_blacklisted_ip, "add ip <ip> blacklist", &add_blacklisted_ip);
+    INSTALL_CMD(del_blacklisted_ip, "del ip <ip> blacklist", &del_blacklisted_ip);
 
     /* SELECT utils */
     fd_set socks;
@@ -120,7 +127,7 @@ int main(int argc, char** argv)
     socklen_t len;
     SS tmp_addr;
 
-    while (!stop)
+    while (cnt)
     {
         /* Start the loop by processing all pending background tasks */
         tv.tv_sec = Timer_list_process(timers);
@@ -297,6 +304,25 @@ int main(int argc, char** argv)
 
             if (size > 0)
             {
+                char command[MAX_COMMAND_SIZE] = {0};
+                size_t command_length = (size_t)size;
+                if (command_length >= sizeof(command))
+                {
+                    print_command_result(
+                        global_server->command_data_sock,
+                        COMMAND_FAILED,
+                        "command exceeds maximum length");
+                    continue;
+                }
+                memcpy(command, buf, command_length);
+                while (command_length > 0 &&
+                       (command[command_length - 1] == '\n' ||
+                        command[command_length - 1] == '\r'))
+                    command[--command_length] = '\0';
+
+                int ret_cmd = execute_command(command);
+                print_command_result(global_server->command_data_sock,
+                                     ret_cmd, command);
                 DEBUG(LOG_LEVEL_TOO_MUCH,
                       "Received command data: bytes=%zd", size);
             }

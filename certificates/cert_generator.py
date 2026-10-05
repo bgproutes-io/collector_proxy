@@ -11,6 +11,8 @@ import time
 
 CERTIFICATE_RENEWAL_THRESHOLD_SECONDS = 7 * 24 * 60 * 60
 CERTIFICATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+CERTIFICATE_RENEWAL_RETRY_DELAYS_SECONDS = (5 * 60, 15 * 60, 60 * 60)
+CERTIFICATE_RENEWAL_MAX_RETRY_DELAY_SECONDS = 6 * 60 * 60
 
 
 class Config:
@@ -443,6 +445,32 @@ class CertGenerator:
 
 
 
+    def validate_existing_certificate(self):
+        """Validate persisted certificates without using the enrollment token."""
+        cert_dir = self.config.internal_directory
+        if not cert_dir:
+            raise RuntimeError("internal_directory is not configured")
+
+        self._validate_client_certificate(
+            os.path.join(cert_dir, "client.key"),
+            os.path.join(cert_dir, "client.crt"),
+            os.path.join(cert_dir, "ca.crt"),
+            minimum_validity_seconds=0,
+        )
+
+
+
+    @staticmethod
+    def _renewal_retry_delay(consecutive_failures):
+        if consecutive_failures <= 0:
+            raise ValueError("consecutive_failures must be positive")
+        retry_index = consecutive_failures - 1
+        if retry_index < len(CERTIFICATE_RENEWAL_RETRY_DELAYS_SECONDS):
+            return CERTIFICATE_RENEWAL_RETRY_DELAYS_SECONDS[retry_index]
+        return CERTIFICATE_RENEWAL_MAX_RETRY_DELAY_SECONDS
+
+
+
     def run_renewal_loop(self):
         """Check certificates daily and listen for UDP renewal commands.
 
@@ -459,14 +487,26 @@ class CertGenerator:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as command_socket:
             command_socket.bind((self.config.command_host, command_port))
             next_certificate_check = time.monotonic()
+            consecutive_renewal_failures = 0
 
             while True:
                 current_time = time.monotonic()
                 if current_time >= next_certificate_check:
-                    self._renew_if_needed()
-                    next_certificate_check = (
-                        time.monotonic() + CERTIFICATE_CHECK_INTERVAL_SECONDS
-                    )
+                    if self._renew_if_needed():
+                        consecutive_renewal_failures = 0
+                        next_certificate_check = (
+                            time.monotonic() + CERTIFICATE_CHECK_INTERVAL_SECONDS
+                        )
+                    else:
+                        consecutive_renewal_failures += 1
+                        retry_delay = self._renewal_retry_delay(
+                            consecutive_renewal_failures
+                        )
+                        next_certificate_check = time.monotonic() + retry_delay
+                        print(
+                            "Retrying certificate renewal check in "
+                            f"{retry_delay} seconds"
+                        )
                     continue
 
                 command_socket.settimeout(next_certificate_check - current_time)
@@ -493,10 +533,22 @@ class CertGenerator:
                     self.renew_cert()
                 except Exception as error:
                     print(f"Certificate renewal command failed: {error}")
+                    consecutive_renewal_failures += 1
+                    retry_delay = self._renewal_retry_delay(
+                        consecutive_renewal_failures
+                    )
+                    next_certificate_check = min(
+                        next_certificate_check,
+                        time.monotonic() + retry_delay,
+                    )
                     self._send_command_response(
                         command_socket, sender, "error: certificate renewal failed"
                     )
                 else:
+                    consecutive_renewal_failures = 0
+                    next_certificate_check = (
+                        time.monotonic() + CERTIFICATE_CHECK_INTERVAL_SECONDS
+                    )
                     self._send_command_response(
                         command_socket, sender, "ok: certificate renewed"
                     )
@@ -507,10 +559,12 @@ class CertGenerator:
         try:
             if self.certificate_needs_renewal():
                 self.renew_cert()
+            return True
         except Exception as error:
             # A temporary signer or network failure must not permanently
             # disable future renewal attempts.
             print(f"Certificate renewal check failed: {error}")
+            return False
 
 
 
@@ -523,8 +577,9 @@ class CertGenerator:
 
 
 
-    def _validate_renewed_client_certificate(
-        self, key_path, certificate_path, ca_path
+    def _validate_client_certificate(
+        self, key_path, certificate_path, ca_path,
+        minimum_validity_seconds=CERTIFICATE_RENEWAL_THRESHOLD_SECONDS,
     ):
         subprocess.run(
             [
@@ -538,7 +593,7 @@ class CertGenerator:
         subprocess.run(
             [
                 "openssl", "x509", "-in", certificate_path,
-                "-noout", "-checkend", "2592000",
+                "-noout", "-checkend", str(minimum_validity_seconds),
             ],
             check=True,
             stdout=subprocess.PIPE,
@@ -617,6 +672,18 @@ class CertGenerator:
 
 
 
+    def _validate_renewed_client_certificate(
+        self, key_path, certificate_path, ca_path
+    ):
+        self._validate_client_certificate(
+            key_path,
+            certificate_path,
+            ca_path,
+            minimum_validity_seconds=30 * 24 * 60 * 60,
+        )
+
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate and renew the BMP proxy TLS certificate"
@@ -651,6 +718,10 @@ def main():
         raise RuntimeError(
             "Incomplete certificate state; missing: " + ", ".join(missing_paths)
         )
+    else:
+        # Reuse a complete certificate set from the persistent Docker volume.
+        # This validation path never sends the one-time enrollment token.
+        certificate_generator.validate_existing_certificate()
 
     certificate_generator.run_renewal_loop()
 

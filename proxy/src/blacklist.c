@@ -198,6 +198,31 @@ static int Blacklist_add_key(Blacklist_t *list, const Blacklist_key_t *key)
 
 
 
+static int Blacklist_del_key(Blacklist_t *list, const Blacklist_key_t *key)
+{
+    if (!list)
+        return -1;
+
+    uint32_t hash = Blacklist_hash(key);
+    size_t index = hash & (list->size - 1);
+    Blacklist_entry_t **entry_link = &list->buckets[index];
+
+    while (*entry_link) {
+        Blacklist_entry_t *entry = *entry_link;
+        if (entry->hash == hash && Blacklist_key_equal(&entry->key, key)) {
+            *entry_link = entry->next;
+            free(entry);
+            list->count--;
+            return 0;
+        }
+        entry_link = &entry->next;
+    }
+
+    return 0;
+}
+
+
+
 int Blacklist_add_asn(Blacklist_t *list, uint32_t asn)
 {
     Blacklist_key_t key;
@@ -210,9 +235,28 @@ int Blacklist_add_asn(Blacklist_t *list, uint32_t asn)
 int Blacklist_add_ip(Blacklist_t *list, const char *ip)
 {
     Blacklist_key_t key;
-    if (Blacklist_key_from_string(ip, &key) < 0)
+    if (!ip || Blacklist_key_from_string(ip, &key) < 0)
         return -1;
     return Blacklist_add_key(list, &key);
+}
+
+
+
+int Blacklist_del_asn(Blacklist_t *list, uint32_t asn)
+{
+    Blacklist_key_t key;
+    Blacklist_key_from_asn(asn, &key);
+    return Blacklist_del_key(list, &key);
+}
+
+
+
+int Blacklist_del_ip(Blacklist_t *list, const char *ip)
+{
+    Blacklist_key_t key;
+    if (!ip || Blacklist_key_from_string(ip, &key) < 0)
+        return -1;
+    return Blacklist_del_key(list, &key);
 }
 
 

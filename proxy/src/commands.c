@@ -458,7 +458,7 @@ int execute_command(char command[MAX_COMMAND_SIZE])
 
 
 
-void print_command_result(int commandSock, int ret, char cmd[1024])
+void print_command_result(int commandSock, int ret, const char *cmd)
 {
     char buf[MAX_COMMAND_SIZE];
 

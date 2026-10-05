@@ -25,8 +25,9 @@ typedef struct proxy_server_s
 {
     /* General information */
     Peering_protocol_t proto;       /* Type of protocol used by this client */
-    bool use_bmp_filters;           /* Can we just forward the received data, or do
-                                        we need to filter some portions of it */
+    bool use_bmp_filters;           /* Whether completed BMP messages must be
+                                        checked against the current blacklists.
+                                        BMP streams are always message-framed. */
     bool collector_connected;
     bool router_connected;
 

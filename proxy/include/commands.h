@@ -263,7 +263,7 @@ extern int execute_command(char cmd[MAX_COMMAND_SIZE]);
 /**
  * @brief Print feedback for command execution (error messages).
  */
-void print_command_result(int commandSock, int ret, char cmd[1024]);
+void print_command_result(int commandSock, int ret, const char *cmd);
 
 
 /* ========================= Global Tree Instance ======================== */

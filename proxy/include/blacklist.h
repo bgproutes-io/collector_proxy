@@ -25,6 +25,10 @@ void Blacklist_free(Blacklist_t *list);
 int Blacklist_add_asn(Blacklist_t *list, uint32_t asn);
 int Blacklist_add_ip(Blacklist_t *list, const char *ip);
 
+/* Deletion is idempotent: deleting a key that is not present succeeds. */
+int Blacklist_del_asn(Blacklist_t *list, uint32_t asn);
+int Blacklist_del_ip(Blacklist_t *list, const char *ip);
+
 bool Blacklist_contains_asn(const Blacklist_t *list, uint32_t asn);
 bool Blacklist_contains_ip(const Blacklist_t *list, const SS *ip);
 
