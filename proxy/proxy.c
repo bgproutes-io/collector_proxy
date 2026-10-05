@@ -7,6 +7,14 @@
 #include "include/proxy_server.h"
 #include "include/commands_def.h"
 
+static volatile sig_atomic_t tls_reload_requested = 0;
+
+static void request_tls_reload(int signal_number)
+{
+    (void)signal_number;
+    tls_reload_requested = 1;
+}
+
 static void socket_peer_string(int socket_fd, char *dest, size_t dest_size)
 {
     SS address = {0};
@@ -109,6 +117,21 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
+    struct sigaction reload_action = {0};
+    reload_action.sa_handler = request_tls_reload;
+    sigemptyset(&reload_action.sa_mask);
+    if (sigaction(SIGHUP, &reload_action, NULL) < 0)
+    {
+        ERROR(LOG_LEVEL_ALWAYS,
+              "Unable to install TLS reload signal handler: %s (%d)",
+              strerror(errno), errno);
+        Proxy_server_free(global_server);
+        Timer_list_free(timers);
+        finish_debug();
+        Config_cleanup();
+        return EXIT_FAILURE;
+    }
+
     /* Install the different commands */
     commands_init();
     INSTALL_CMD(exit_server, "exit-server", &exit_server);
@@ -129,6 +152,12 @@ int main(int argc, char** argv)
 
     while (cnt)
     {
+        if (tls_reload_requested)
+        {
+            tls_reload_requested = 0;
+            Proxy_server_reload_tls(global_server);
+        }
+
         /* Start the loop by processing all pending background tasks */
         tv.tv_sec = Timer_list_process(timers);
 

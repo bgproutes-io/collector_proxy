@@ -26,12 +26,20 @@ int main(void)
     write_config(valid_path,
                  "blacklisted_asns: 64512, 64513,64512\n"
                  "blacklisted_ips: 192.0.2.1, 2001:db8::feed\n"
+                 "internal_directory: /var/lib/bgproutes/tls\n"
+                 "use_tls: true\n"
                  "proto: BmP\n");
 
     assert(Config_read(valid_path) == 0);
     assert(config.debug_level == DEFAULT_DEBUG_LEVEL);
     assert(config.proto_configured);
     assert(config.proto == PROTOCOL_BMP);
+    assert(config.use_tls == True);
+    assert(strcmp(config.client_crt,
+                  "/var/lib/bgproutes/tls/client.crt") == 0);
+    assert(strcmp(config.client_key,
+                  "/var/lib/bgproutes/tls/client.key") == 0);
+    assert(strcmp(config.ca_crt, "/var/lib/bgproutes/tls/ca.crt") == 0);
     assert(config.blacklisted_asns->count == 2);
     assert(config.blacklisted_ips->count == 2);
     assert(Config_is_asn_blacklisted(64512));

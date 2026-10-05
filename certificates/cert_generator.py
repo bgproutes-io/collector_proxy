@@ -1,6 +1,7 @@
 import argparse
 import ipaddress
 import requests
+import signal
 import socket
 import os
 import re
@@ -40,14 +41,14 @@ class Config:
                 if not stripped_line or stripped_line.startswith("#"):
                     continue
 
-                l = stripped_line.split(maxsplit=1)
-                if len(l) != 2:
+                keyword, separator, value = stripped_line.partition(":")
+                if not separator:
                     print(f"Invalid configuration at line {line_idx}")
                     line_idx += 1
                     continue
 
-                keyword = l[0].strip(":")
-                value = l[1]
+                keyword = keyword.strip()
+                value = value.strip()
 
                 if not hasattr(self, keyword):
                     print(f"Configuration does not have a value '{keyword}' (line {line_idx}). Skiping.")
@@ -57,18 +58,31 @@ class Config:
                 setattr(self, keyword, value)
                 line_idx += 1
 
+        enrollment_token = os.environ.get("BMP_TLS_ENROLLMENT_TOKEN")
+        if enrollment_token:
+            self.cert_token = enrollment_token
+
         try:
             self.collector_port = int(self.collector_port)
             self.command_port   = int(self.command_port)
-            self.use_tls = self.use_tls.lower() == 'true'
-        except (AttributeError, TypeError, ValueError):
-            return
+            normalized_use_tls = self.use_tls.strip().lower()
+            if normalized_use_tls in ("1", "true", "yes", "on"):
+                self.use_tls = True
+            elif normalized_use_tls in ("0", "false", "no", "off"):
+                self.use_tls = False
+            else:
+                raise ValueError("use_tls must be a boolean value")
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                "collector_port, command_port, and use_tls must be configured"
+            ) from error
 
 
 
 class CertGenerator:
-    def __init__(self, cfg_file :str):
+    def __init__(self, cfg_file :str, notify_pid_file=None):
         self.config = Config(cfg_file)
+        self.notify_pid_file = notify_pid_file
 
         ### --- We do not need to use TLS, just exit this process --- ###
         if not self.config.use_tls:
@@ -401,6 +415,8 @@ class CertGenerator:
             temporary_cert_path = None
             os.replace(temporary_csr_path, csr_path)
 
+            self._notify_proxy_reload()
+
             return cert_path, key_path, ca_path
         finally:
             for temporary_path in (
@@ -577,6 +593,25 @@ class CertGenerator:
 
 
 
+    def _notify_proxy_reload(self):
+        if not self.notify_pid_file:
+            return
+
+        try:
+            with open(self.notify_pid_file, "r", encoding="ascii") as pid_file:
+                proxy_pid = int(pid_file.read().strip())
+            if proxy_pid <= 1:
+                raise ValueError("invalid proxy PID")
+            os.kill(proxy_pid, signal.SIGHUP)
+            print(f"Notified proxy process {proxy_pid} to reload TLS certificates")
+        except (OSError, TypeError, ValueError) as error:
+            # Renewal itself succeeded and the files are safely installed. A
+            # later proxy restart will still load them, so notification failure
+            # must not turn the renewal into a false failure.
+            print(f"Unable to notify proxy about renewed certificates: {error}")
+
+
+
     def _validate_client_certificate(
         self, key_path, certificate_path, ca_path,
         minimum_validity_seconds=CERTIFICATE_RENEWAL_THRESHOLD_SECONDS,
@@ -694,9 +729,21 @@ def main():
         default="proxy.conf",
         help="configuration file to use (default: proxy.conf)",
     )
+    parser.add_argument(
+        "--bootstrap-only",
+        action="store_true",
+        help="prepare and validate certificates, then exit",
+    )
+    parser.add_argument(
+        "--notify-pid-file",
+        help="send SIGHUP to the PID stored in this file after renewal",
+    )
     arguments = parser.parse_args()
 
-    certificate_generator = CertGenerator(arguments.config_file)
+    certificate_generator = CertGenerator(
+        arguments.config_file,
+        notify_pid_file=arguments.notify_pid_file,
+    )
     cert_dir = certificate_generator.config.internal_directory
     if not cert_dir:
         raise RuntimeError("internal_directory is not configured")
@@ -722,6 +769,9 @@ def main():
         # Reuse a complete certificate set from the persistent Docker volume.
         # This validation path never sends the one-time enrollment token.
         certificate_generator.validate_existing_certificate()
+
+    if arguments.bootstrap_only:
+        return
 
     certificate_generator.run_renewal_loop()
 

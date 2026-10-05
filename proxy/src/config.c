@@ -74,6 +74,43 @@ static int split_param(char *line, char **param, char **value)
     return 1;
 }
 
+static int parse_bool(const char *value, bool *result)
+{
+    if (strcasecmp(value, "1") == 0 ||
+        strcasecmp(value, "true") == 0 ||
+        strcasecmp(value, "yes") == 0 ||
+        strcasecmp(value, "on") == 0) {
+        *result = True;
+        return 0;
+    }
+    if (strcasecmp(value, "0") == 0 ||
+        strcasecmp(value, "false") == 0 ||
+        strcasecmp(value, "no") == 0 ||
+        strcasecmp(value, "off") == 0) {
+        *result = False;
+        return 0;
+    }
+    return -1;
+}
+
+static int set_tls_directory(Config_t *cfg, const char *directory)
+{
+    if (!*directory)
+        return -1;
+
+    int cert_length = snprintf(cfg->client_crt, sizeof(cfg->client_crt),
+                               "%s/client.crt", directory);
+    int key_length = snprintf(cfg->client_key, sizeof(cfg->client_key),
+                              "%s/client.key", directory);
+    int ca_length = snprintf(cfg->ca_crt, sizeof(cfg->ca_crt),
+                             "%s/ca.crt", directory);
+    if (cert_length < 0 || (size_t)cert_length >= sizeof(cfg->client_crt) ||
+        key_length < 0 || (size_t)key_length >= sizeof(cfg->client_key) ||
+        ca_length < 0 || (size_t)ca_length >= sizeof(cfg->ca_crt))
+        return -1;
+    return 0;
+}
+
 /* ----------------------- DEFAULT VALUES ----------------------- */
 
 static void Config_set_defaults(Config_t *cfg)
@@ -219,8 +256,26 @@ int Config_read(const char *file)
         else if (strcmp(param, "command_port") == 0) {
             config.command_port = atoi(value);
         }
-        else if (strcmp(param, "use_tls") == 0)
-            config.use_tls = atoi(value);
+        else if (strcmp(param, "internal_directory") == 0) {
+            if (set_tls_directory(&config, value) < 0) {
+                fprintf(stderr,
+                        "proxy config error: file=%s line=%u: invalid internal_directory\n",
+                        file, line_number);
+                fclose(f);
+                Config_cleanup();
+                return -1;
+            }
+        }
+        else if (strcmp(param, "use_tls") == 0) {
+            if (parse_bool(value, &config.use_tls) < 0) {
+                fprintf(stderr,
+                        "proxy config error: file=%s line=%u: invalid use_tls value '%s'\n",
+                        file, line_number, value);
+                fclose(f);
+                Config_cleanup();
+                return -1;
+            }
+        }
         else if (strcmp(param, "blacklisted_asns") == 0) {
             if (parse_comma_asn_list(value, config.blacklisted_asns) < 0) {
                 fprintf(stderr,

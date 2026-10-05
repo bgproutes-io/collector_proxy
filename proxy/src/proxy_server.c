@@ -785,6 +785,44 @@ int Proxy_server_connect(Proxy_server_t *proxy)
 
 
 
+int Proxy_server_reload_tls(Proxy_server_t *proxy)
+{
+    if (!proxy || !proxy->use_ssl || !proxy->cfg)
+    {
+        return 0;
+    }
+
+    SSL_CTX *new_context = create_tls_context(
+        proxy->cfg->client_crt,
+        proxy->cfg->client_key,
+        proxy->cfg->ca_crt
+    );
+    if (!new_context)
+    {
+        ERROR(LOG_LEVEL_IMPORTANT,
+              "TLS certificate reload failed; keeping the existing context");
+        return -1;
+    }
+
+    SSL_CTX *old_context = proxy->ssl_ctx;
+    proxy->ssl_ctx = new_context;
+    SSL_CTX_free(old_context);
+
+    INFO(LOG_LEVEL_IMPORTANT,
+         "TLS certificates reloaded; reconnecting to the collector");
+    if (proxy->collector_connected)
+    {
+        Proxy_server_close_collector(proxy);
+    }
+    else
+    {
+        schedule_collector_reconnect(proxy);
+    }
+    return 0;
+}
+
+
+
 int Proxy_server_close_collector(Proxy_server_t* proxy)
 {
     if (!proxy)

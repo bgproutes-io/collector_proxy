@@ -75,6 +75,9 @@ void Proxy_server_free(Proxy_server_t* proxy);
  */
 int Proxy_server_connect(Proxy_server_t *proxy);
 
+/** Reload client certificates atomically and reconnect the collector. */
+int Proxy_server_reload_tls(Proxy_server_t *proxy);
+
 
 /** Copy one raw message into the tail of the server FIFO. */
 int Proxy_server_queue_message(Proxy_server_t *server,
